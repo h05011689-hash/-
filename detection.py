@@ -8,7 +8,7 @@ from collections import Counter
 from pyrogram import Client
 
 # ════════════════════════════════════════
-# الإعدادات الفنية (النسخة النفاثة المصححة)
+# الإعدادات الفنية (النسخة الاستخباراتية الصارمة)
 API_ID         = 26604893
 API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
 SESSION_STRING = "BAGV9V0Af_3r8brUqcEEKfZ0pS6m2mi7vBHXvW-WAeAAd2HCL5xluUtUStq0VslHxtbpgfVKIXRKi9CrWRJWudKeOLA1fHXnwt5c2_hYQiAT2OW4IMrGzWCMrKRrTL2E8yA1AAygPnT7J3jejpylQi0HRavgx-CzlDcBPFB-G6-zgnTi5TKzyuFo9LxpOjV0hjna8nIXHGPX4cgC2QxuD2Dmy8_htVb-uxPIiu5MIcD15ErSyT4mP-A6r3nZb0XAlRaJ9K3CM9a01icSCv19BpFl0QbVtdPvY8zBdRba8aFAAuRBGNYI4akLKKRvHAHXXLMa3dNdLBWOsGBu7UTMn6KCNJgavAAAAAHloT2vAA"
@@ -17,8 +17,14 @@ GROQ_API_KEY   = "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"
 
 logging.basicConfig(level=logging.INFO)
 
-# نمط آمن لعد الإيموجيات في بايثون دون ضرب الـ Unicode Range
 EMOJI_REGEX = re.compile(r'[\u2600-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDF00-\uDFFF]|\uD83D[\uDC00-\uDDFF]|\uD83E[\uDD00-\uDFFF]')
+
+# 🚫 قائمة الحظر اليدوية لكلمات الكلان العامة (عدل عليها براحتك لتضيف أي تريند جديد)
+CLAN_BLACKLIST = {
+    "كلان", "حظر", "خاص", "اللجنة", "العليا", "اللجنه", "البطولة", "بطولة", 
+    "مباراة", "المباراة", "حبيبي", "منور", "جروب", "الجروب", "ياسر", "رابط", 
+    "سكواد", "طرد", "سيرفر", "البوت", "عادي", "العاب", "ألعاب", "tgt", "TGT"
+}
 
 # ════════════════════════════════════════
 def _extract_percentage(text: str) -> int:
@@ -27,10 +33,16 @@ def _extract_percentage(text: str) -> int:
     return min(100, int(match.group(1))) if match else 0
 
 def _clean_text_from_trends(text_list: list, global_trends: set) -> str:
+    """تطهير كامل للنص من كلمات الكلان العامة والتريندات وقائمة الحظر الصارمة"""
     cleaned_messages = []
     for msg in text_list:
         words = msg.split()
-        filtered_words = [w for w in words if w.lower() not in global_trends and not w.startswith('@')]
+        filtered_words = []
+        for w in words:
+            w_clean = w.lower().strip("؟?!.,")
+            # استبعاد إذا كانت كلمة شائعة، يوزر، أو موجودة في قائمة حظر الكلان
+            if w_clean not in global_trends and w_clean not in CLAN_BLACKLIST and not w.startswith('@') and len(w_clean) > 1:
+                filtered_words.append(w)
         if filtered_words:
             cleaned_messages.append(" ".join(filtered_words))
     return " | ".join(cleaned_messages)
@@ -68,7 +80,6 @@ def _calc_timing_overlap(times1: list, times2: list) -> int:
 
 # ════════════════════════════════════════
 async def _collect_members_and_trends(app: Client, limit: int = 10000):
-    """سحب الـ 10 آلاف رسالة بأقصى سرعة مدعومة من تلجرام"""
     users_data: Dict[int, dict] = {}
     all_words = []
     
@@ -92,8 +103,9 @@ async def _collect_members_and_trends(app: Client, limit: int = 10000):
     except Exception as e:
         logging.error(f"فشل السحب السريع: {e}")
 
+    # جعل الفلترة أشرس: أي كلمة تتكرر بنسبة تزيد عن 0.8% من إجمالي الكلام تعتبر تريند وتُحذف فوراً
     word_counts = Counter(all_words)
-    global_trends = set([word for word, count in word_counts.items() if count > (limit * 0.015)]) 
+    global_trends = set([word for word, count in word_counts.items() if count > (limit * 0.008)]) 
     
     logging.info(f"اكتمل السحب. تم العثور على {len(users_data)} مستخدم.")
     return users_data, global_trends
@@ -103,10 +115,11 @@ async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, ti
     clean_text1 = _clean_text_from_trends(data1["messages"], global_trends)[:1500]
     clean_text2 = _clean_text_from_trends(data2["messages"], global_trends)[:1500]
 
-    if len(clean_text1) < 25 or len(clean_text2) < 25:
-        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": "غير مشبوه - النصوص غير كافية."}
+    # لو النصوص بقيت فارغة أو قصيرة جداً بعد حذف تريندات الكلان وقائمة الحظر، نقفل القضية فوراً
+    if len(clean_text1) < 40 or len(clean_text2) < 40:
+        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": "غير مشبوه - النصوص متباعدة تماماً بعد تنقيتها من لغة الكلان العامة."}
 
-    prompt = f"""أنت رئيس الاستخبارات الجنائية الرقمية. حلل الأسلوب الباقي الصافي بعد حذف الكلمات المستهلكة بالكلان.
+    prompt = f"""أنت محقق جنائي رقمي صارم جداً. أمامك نصوص تم تنقيتها وتطهيرها تماماً من الكلمات والتريندات المستهلكة داخل الكلان.
 
 [المشتبه به الأول: {user1}]
 {clean_text1}
@@ -114,11 +127,15 @@ async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, ti
 [المشتبه به الثاني: {user2}]
 {clean_text2}
 
-[التحليل: {syntax_score:.1f}% تشابه هيكلي، {timing_score}% تزامن زمني]
+[التحليل الإحصائي الإضافي: {syntax_score:.1f}% تشابه هيكلي، {timing_score}% تزامن زمني]
 
-أجب بالتنسيق الصارم التالي:
+⚠️ قواعد صارمة جداً للتحليل:
+1. أي تشابه مبني على كلمات عامة تستخدم في جروبات الألعاب (مثل "خاص"، "حظر"، "كلان"، "اللجنة") يتم تجاهله تماماً وجعل النسبة 0% فوراً.
+2. ابحث فقط في لغة اللاشعور: الأخطاء الإملائية النادرة جداً، طريقة دمج الحروف، تتابع الإيموجيات الخاص. إذا لم تجد تلازماً فريداً مستحيلاً حدوثه بالصدفة، فالنسبة 0%.
+
+أجب بالتنسيق الصارم التالي فقط دون زيادة:
 نسبة التشابه: [رقم]%
-المؤشرات: [أدلة البصمة العميقة فقط]
+المؤشرات: [أدلة البصمة العميقة الاستثنائية فقط]
 الحكم: [مشبوه جداً / غير مشبوه]"""
 
     url     = "https://api.groq.com/openai/v1/chat/completions"
@@ -131,12 +148,12 @@ async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, ti
     }
     try:
         loop = asyncio.get_event_loop()
-        # تقليص الـ timeout لـ 15 ثانية لمنع تعليق الكود نهائياً
         resp = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload, timeout=15))
         result_txt = resp.json()["choices"][0]["message"]["content"]
         ai_pct = _extract_percentage(result_txt)
         
-        if ai_pct < 45:
+        # رفع حد التسامح: لو النسبة أقل من 55% نعتبرها 0% حماية للأبرياء ومنعاً للنتائج العادية
+        if ai_pct < 55:
             final = 0
         else:
             final = int(ai_pct * 0.60 + syntax_score * 0.20 + timing_score * 0.20)
@@ -152,7 +169,6 @@ async def find_top_similar_pairs(max_users: int = 12, top_n: int = 3) -> List[Di
         all_users, global_trends = await _collect_members_and_trends(app, limit=10000)
         if not all_users: return []
 
-        # التركيز على الحسابات المتفاعلة جداً لضمان عدم تضييع الوقت في حسابات كتبت كلمة أو كلمتين
         active = {uid: d for uid, d in all_users.items() if d["msg_count"] >= 15 and len(d["messages"]) >= 5}
         sorted_uids = sorted(active.keys(), key=lambda u: active[u]["msg_count"], reverse=True)[:max_users]
 
@@ -167,8 +183,8 @@ async def find_top_similar_pairs(max_users: int = 12, top_n: int = 3) -> List[Di
                 timing = _calc_timing_overlap(d1["timestamps"], d2["timestamps"])
                 syntax = _calculate_syntax_fingerprint(d1["messages"], d2["messages"])
                 
-                # فلتر التصفية الطائرة الصارم جداً لرفع السرعة الصاروخية
-                if timing < 8 and syntax < 45:
+                # تصفية طائرة صارمة جداً للأزواج غير المتوافقة مبدئياً لضمان السرعة الفائقة
+                if timing < 10 and syntax < 50:
                     continue
 
                 u1_name = d1["username"] or d1["first_name"] or str(u1_id)
@@ -179,7 +195,7 @@ async def find_top_similar_pairs(max_users: int = 12, top_n: int = 3) -> List[Di
         if not pre_pairs: return []
 
         pre_pairs.sort(key=lambda x: (x[4] + x[5]), reverse=True)
-        final_targets = pre_pairs[:8] # فحص أعمق لأخطر 8 أزواج فقط لمنع البطء والـ Rate limit
+        final_targets = pre_pairs[:6] # تقليل عدد الأزواج المفحوصة نهائياً لأقوى 6 أزواج لسرعة خارقة
 
         tasks = [
             analyze_pair_groq(p[0], p[1], p[2], p[3], p[4], p[5], global_trends)
@@ -190,7 +206,7 @@ async def find_top_similar_pairs(max_users: int = 12, top_n: int = 3) -> List[Di
         results_list = list(results)
         results_list.sort(key=lambda x: x["similarity"], reverse=True)
 
-        suspicious = [r for r in results_list if r["similarity"] >= 45]
+        suspicious = [r for r in results_list if r["similarity"] >= 55]
         if not suspicious:
             for r in results_list[:top_n]: r["no_suspicious"] = True
             return results_list[:top_n]
