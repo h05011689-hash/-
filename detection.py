@@ -1,14 +1,14 @@
-# detection.py
 import asyncio
 import re
 import requests
 import logging
+import math
 from typing import List, Dict, Any
 from collections import Counter
 from pyrogram import Client
 
 # ════════════════════════════════════════
-# بيانات الدخول والإعدادات
+# الإعدادات الفنية (النسخة الإمبراطورية النفاثة)
 API_ID         = 26604893
 API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
 SESSION_STRING = "BAGV9V0Af_3r8brUqcEEKfZ0pS6m2mi7vBHXvW-WAeAAd2HCL5xluUtUStq0VslHxtbpgfVKIXRKi9CrWRJWudKeOLA1fHXnwt5c2_hYQiAT2OW4IMrGzWCMrKRrTL2E8yA1AAygPnT7J3jejpylQi0HRavgx-CzlDcBPFB-G6-zgnTi5TKzyuFo9LxpOjV0hjna8nIXHGPX4cgC2QxuD2Dmy8_htVb-uxPIiu5MIcD15ErSyT4mP-A6r3nZb0XAlRaJ9K3CM9a01icSCv19BpFl0QbVtdPvY8zBdRba8aFAAuRBGNYI4akLKKRvHAHXXLMa3dNdLBWOsGBu7UTMn6KCNJgavAAAAAHloT2vAA"
@@ -19,248 +19,181 @@ logging.basicConfig(level=logging.INFO)
 
 # ════════════════════════════════════════
 def _extract_percentage(text: str) -> int:
-    """استخراج النوايا والنسب المئوية من رد الموديل بدقة"""
     match = re.search(r'(?:نسبة التشابه|percentage|similarity):\s*(\d+)', text, re.IGNORECASE)
-    if not match:
-        match = re.search(r'(\d+)\s*%', text)
+    if not match: match = re.search(r'(\d+)\s*%', text)
     return min(100, int(match.group(1))) if match else 0
 
-def _calc_timing_overlap(times1: list, times2: list) -> int:
-    """
-    حساب التشابه الزمني الذكي:
-    يقسم الوقت لدقائق ويحسب كم مرة التقى الطرفان في نفس الدقيقة فعلياً.
-    يمنع الـ 100% الوهمية الناتجة عن الصدف العابرة.
-    """
-    if not times1 or not times2:
-        return 0
+def _clean_text_from_trends(text_list: list, global_trends: set) -> str:
+    cleaned_messages = []
+    for msg in text_list:
+        words = msg.split()
+        filtered_words = [w for w in words if w.lower() not in global_trends and not w.startswith('@')]
+        if filtered_words:
+            cleaned_messages.append(" ".join(filtered_words))
+    return " | ".join(cleaned_messages)
+
+def _calculate_syntax_fingerprint(msgs1: list, msgs2: list) -> float:
+    if not msgs1 or not msgs2: return 0.0
     
+    def get_features(msgs):
+        total_len = sum(len(m) for m in msgs)
+        avg_len = total_len / len(msgs)
+        emoji_count = len(re.findall(r'[\u2600-\u1f9ff]', "".join(msgs))) / max(1, total_len)
+        q_count = len(re.findall(r'[؟\?]', "".join(msgs))) / max(1, total_len)
+        return avg_len, emoji_count, q_count
+
+    f1 = get_features(msgs1)
+    f2 = get_features(msgs2)
+    
+    distance = math.sqrt(sum((f1[i] - f2[i])**2 for i in range(3)))
+    similarity = 1 / (1 + distance)
+    return similarity * 100
+
+def _calc_timing_overlap(times1: list, times2: list) -> int:
+    if not times1 or not times2: return 0
     buckets1 = Counter(int(t // 60) for t in times1)
     buckets2 = Counter(int(t // 60) for t in times2)
-    
     common_minutes = set(buckets1.keys()) & set(buckets2.keys())
     total_overlaps = sum(min(buckets1[m], buckets2[m]) for m in common_minutes)
-    
     total_msg_count = min(len(times1), len(times2))
-    if total_msg_count == 0:
-        return 0
-        
+    if total_msg_count == 0: return 0
     score = int((total_overlaps / total_msg_count) * 100)
-    
-    # كبح جماح النسبة عند قلة الرسائل المشتركة
-    if total_overlaps < 3:
-        score = min(score, 25)
-        
-    return min(100, score)
+    return min(100, score if total_overlaps >= 3 else min(score, 15))
 
 # ════════════════════════════════════════
-async def _collect_members(app: Client, limit: int = 800) -> Dict[int, dict]:
-    """جمع مستخدمي الكلان النشطين من الهيستوري"""
+async def _collect_members_and_trends(app: Client, limit: int = 10000):
+    """جمع البيانات وتحديد التريندات من آخر 10 آلاف رسالة بسرعة فائقة"""
     users_data: Dict[int, dict] = {}
-    count = 0
+    all_words = []
+    
+    logging.info(f"بدء سحب {limit} رسالة من القناة/الجروب...")
+    
+    async for msg in app.get_chat_history(TARGET_CHANNEL, limit=limit):
+        u = msg.from_user
+        if not u or u.is_bot: continue
+        uid = u.id
+        if uid not in users_data:
+            users_data[uid] = {"username": u.username or "", "first_name": u.first_name or str(uid), "messages": [], "timestamps": [], "msg_count": 0}
+        
+        if msg.text and len(msg.text.strip()) > 2:
+            txt = msg.text.strip()
+            users_data[uid]["messages"].append(txt)
+            all_words.extend(txt.lower().split())
+        if msg.date:
+            users_data[uid]["timestamps"].append(msg.date.timestamp())
+        users_data[uid]["msg_count"] += 1
 
-    try:
-        async for msg in app.get_chat_history(TARGET_CHANNEL, limit=limit):
-            count += 1
-            u = msg.from_user
-            if not u or u.is_bot:
-                continue
-            uid = u.id
-            if uid not in users_data:
-                users_data[uid] = {
-                    "username":   u.username or "",
-                    "first_name": u.first_name or str(uid),
-                    "messages":   [],
-                    "timestamps": [],
-                    "msg_count":  0,
-                }
-            if msg.text and len(msg.text.strip()) > 2:
-                users_data[uid]["messages"].append(msg.text.strip())
-            if msg.date:
-                users_data[uid]["timestamps"].append(msg.date.timestamp())
-            users_data[uid]["msg_count"] += 1
-
-    except Exception as e:
-        logging.warning(f"get_chat_history failed ({e}), trying search_messages...")
-        try:
-            async for msg in app.search_messages(TARGET_CHANNEL, limit=limit):
-                u = msg.from_user
-                if not u or u.is_bot:
-                    continue
-                uid = u.id
-                if uid not in users_data:
-                    users_data[uid] = {
-                        "username":   u.username or "",
-                        "first_name": u.first_name or str(uid),
-                        "messages":   [],
-                        "timestamps": [],
-                        "msg_count":  0,
-                    }
-                if msg.text and len(msg.text.strip()) > 2:
-                    users_data[uid]["messages"].append(msg.text.strip())
-                if msg.date:
-                    users_data[uid]["timestamps"].append(msg.date.timestamp())
-                users_data[uid]["msg_count"] += 1
-        except Exception as e2:
-            logging.error(f"search_messages also failed: {e2}")
-
-    logging.info(f"جُمع {len(users_data)} مستخدم من {count} رسالة")
-    return users_data
+    # رصد الكلمات الأكثر استهلاكاً في الـ 10 آلاف رسالة وحظرها (النسبة تم وزنها طردياً)
+    word_counts = Counter(all_words)
+    global_trends = set([word for word, count in word_counts.items() if count > (limit * 0.015)]) 
+    
+    logging.info(f"اكتمل السحب. تم رصد {len(users_data)} مستخدم نشط.")
+    return users_data, global_trends
 
 # ════════════════════════════════════════
-async def _fetch_more_messages(app: Client, uid: int, existing: list, limit: int = 200) -> list:
-    """جلب أرشيف رسائل أعمق لتأكيد البصمة"""
-    extra = []
-    try:
-        async for msg in app.search_messages(TARGET_CHANNEL, from_user=uid, limit=limit):
-            if msg.text and len(msg.text.strip()) > 2:
-                t = msg.text.strip()
-                if t not in existing:
-                    extra.append(t)
-    except Exception as e:
-        logging.warning(f"fetch_more for {uid}: {e}")
-    return extra
+async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, timing_score: int, syntax_score: float, global_trends: set) -> Dict[str, Any]:
+    clean_text1 = _clean_text_from_trends(data1["messages"], global_trends)[:2000]
+    clean_text2 = _clean_text_from_trends(data2["messages"], global_trends)[:2000]
 
-# ════════════════════════════════════════
-async def analyze_pair_groq(
-    data1: dict, data2: dict,
-    user1: str, user2: str,
-    timing_score: int
-) -> Dict[str, Any]:
-    """تحليل زوج بالذكاء الاصطناعي بأعلى درجات الصرامة القضائية ومنع أدلة اليوزرات العامة"""
+    if len(clean_text1) < 30 or len(clean_text2) < 30:
+        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": "غير مشبوه - نصوص غير كافية بعد التطهير."}
 
-    if not data1["messages"] or not data2["messages"]:
-        return {
-            "user1": user1, "user2": user2,
-            "similarity": 0, "ai_score": 0, "timing": timing_score,
-            "report": "بيانات غير كافية لعدم وجود نصوص مأرشفة."
-        }
+    prompt = f"""أنت رئيس الاستخبارات الجنائية الرقمية. أمامك نصوص مأرشفة نظيفة تماماً (بدون كلمات الكلان العامة واليوزرات المستهلكة).
 
-    text1 = " | ".join(data1["messages"])[:3000]
-    text2 = " | ".join(data2["messages"])[:3000]
+[المشتبه به الأول: {user1}]
+{clean_text1}
 
-    prompt = f"""أنت رئيس المحكمة الجنائية الرقمية العليا. مهمتك كشف الحسابات البديلة بناءً على الأسلوب الخفي فقط.
+[المشتبه به الثاني: {user2}]
+{clean_text2}
 
-[المتحدث الأول: {user1}]
-{text1}
+[التحليل الإحصائي: {syntax_score:.1f}% تشابه هيكلي، {timing_score}% تزامن زمني]
 
-[المتحدث الثاني: {user2}]
-{text2}
+مهمتك:
+قارن الأسلوب الباقي الصافي. إذا لم تجد تلازم لغوي فريد، النسبة 0% فوراً.
 
-[مؤشر التزامن الزمني: {timing_score}%]
-
-⚠️ تحذير صارم وقواعد عسكرية للتحليل:
-1. ممنوع منعا باتا اعتبار ذكر أسماء لاعبين آخرين أو إداريين (مثل المنظمين أو يوزرات مشهورة بالكلان) دليلاً على التشابه. طبيعي أن يتحدث كل أعضاء الكلان مع نفس الأشخاص المشهورين!
-2. ممنوع اعتبار الكلام عن "الألعاب، البطولات، التفتيح، الجروب، النتيجه" دليلاً. هذا جروب ألعاب والكل يتحدث في نفس الموضوع وبنفس المصطلحات!
-3. ركز فقط على "الأسلوب المرفوض تزييفه" في الكتابة:
-   - هل كلاهما يضع الإيموجي في منتصف الكلام أم في نهايته دائماً؟
-   - هل كلاهما يرتكب نفس الخطأ الإملائي النادر (مثل كتابة الياء ألف مقصورة أو العكس)؟
-   - هل هناك "لازمة كلامية" نادرة جداً وخاصة (مش كلمة عامية مشهورة زي هههه أو شلون أو يا عمري)؟
-4. إذا لم تجد دليلاً لغوياً حقيقياً يثبت أن الشخص واحد، اجعل النسبة 0% فوراً واكتب "غير مشبوه". لا تظلم أحداً بناءً على كليشيهات الجروب الطبيعية.
-
-أجب بتنسيق مقتضب جداً:
+أجب بهذا التنسيق الصارم فقط:
 نسبة التشابه: [رقم]%
-المؤشرات: [نقاط للأدلة اللغوية الحقيقية فقط]
-الحكم: [مشبوه جداً / غير مشبوه]"""
+المؤشرات: [أدلة البصمة العميقة فقط]
+الحكم: [مشبوه جداً (تطابق الحمض اللغوي) / غير مشبوه]"""
 
     url     = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model":       "llama-3.3-70b-versatile",
-        "messages":    [{"role": "user", "content": prompt}],
-        "temperature": 0.0, 
-        "max_tokens":  300,
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.0,
+        "max_tokens": 200 # تقليل الـ tokens لتسريع استجابة الـ API
     }
     try:
-        resp       = requests.post(url, headers=headers, json=payload, timeout=40)
-        resp.raise_for_status()
+        # تشغيل الـ Request بـ loop مخصص لمنع تجميد البرنامج
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload, timeout=25))
         result_txt = resp.json()["choices"][0]["message"]["content"]
-        ai_pct     = _extract_percentage(result_txt)
+        ai_pct = _extract_percentage(result_txt)
         
-        # إذا لم يجد الذكاء الاصطناعي دليلاً لغوياً (0%)، نصفر النسبة بالكامل لحماية الأبرياء
-        if ai_pct == 0:
+        if ai_pct < 45:
             final = 0
         else:
-            final = int(ai_pct * 0.75 + timing_score * 0.25)
-        
-        return {
-            "user1": user1, "user2": user2,
-            "similarity": final,
-            "ai_score":   ai_pct,
-            "timing":     timing_score,
-            "report":     result_txt,
-        }
+            final = int(ai_pct * 0.60 + syntax_score * 0.20 + timing_score * 0.20)
+            
+        return {"user1": user1, "user2": user2, "similarity": final, "ai_score": ai_pct, "timing": timing_score, "report": result_txt}
     except Exception as e:
-        return {
-            "user1": user1, "user2": user2,
-            "similarity": 0,
-            "ai_score":   0,
-            "timing":     timing_score,
-            "report":     f"فشل التحليل: {e}",
-        }
+        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": f"فشل: {e}"}
 
 # ════════════════════════════════════════
-async def find_top_similar_pairs(
-    max_users: int = 12,
-    top_n:     int = 3,
-) -> List[Dict[str, Any]]:
-    """المحرك الرئيسي لتصفية وتحديد المشتبه بهم لغوياً فقط"""
-    async with Client(
-        "detect_session",
-        api_id=API_ID, api_hash=API_HASH,
-        session_string=SESSION_STRING,
-        in_memory=True,
-    ) as app:
+async def find_top_similar_pairs(max_users: int = 15, top_n: int = 3) -> List[Dict[str, Any]]:
+    """الدالة الرئيسية السريعة"""
+    async with Client("detect_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, in_memory=True) as app:
 
-        all_users = await _collect_members(app, limit=800)
+        # 1. سحب الـ 10 آلاف رسالة دفعة واحدة
+        all_users, global_trends = await _collect_members_and_trends(app, limit=10000)
 
-        if not all_users:
-            return []
+        if not all_users: return []
 
-        # فلترة مبدئية صارمة لضمان وفرة البيانات
-        active = {
-            uid: d for uid, d in all_users.items()
-            if d["msg_count"] >= 5 and len(d["messages"]) >= 2
-        }
+        # 2. تصفية الحسابات الأكثر تفاعلاً (صاحبة البصمة الأوضح)
+        active = {uid: d for uid, d in all_users.items() if d["msg_count"] >= 10 and len(d["messages"]) >= 4}
+        sorted_uids = sorted(active.keys(), key=lambda u: active[u]["msg_count"], reverse=True)[:max_users]
 
-        sorted_uids = sorted(active.keys(), key=lambda u: active[u]["msg_count"], reverse=True)
-        sorted_uids = sorted_uids[:max_users]
+        if len(sorted_uids) < 2: return []
 
-        if len(sorted_uids) < 2:
-            return []
-
-        # توسيع الأرشيف لضمان العثور على البصمة الحقيقية خلف الكواليس
-        for uid in sorted_uids:
-            if len(active[uid]["messages"]) < 25:
-                extra = await _fetch_more_messages(app, uid, active[uid]["messages"], limit=200)
-                active[uid]["messages"].extend(extra)
-                await asyncio.sleep(0.3)
-
-        tasks = []
+        # 3. بناء المقارنات الرياضية السريعة قبل إزعاج الـ AI
+        pre_pairs = []
         for i in range(len(sorted_uids)):
             for j in range(i + 1, len(sorted_uids)):
-                u1_id = sorted_uids[i]
-                u2_id = sorted_uids[j]
-                d1    = active[u1_id]
-                d2    = active[u2_id]
+                u1_id, u2_id = sorted_uids[i], sorted_uids[j]
+                d1, d2 = active[u1_id], active[u2_id]
 
                 timing = _calc_timing_overlap(d1["timestamps"], d2["timestamps"])
+                syntax = _calculate_syntax_fingerprint(d1["messages"], d2["messages"])
+                
+                # تصفية الطائرة (Fly Filter): لو المؤشرات الأولية ميتة، لا تضيع وقت السيرفر
+                if timing < 5 and syntax < 40:
+                    continue
 
                 u1_name = d1["username"] or d1["first_name"] or str(u1_id)
                 u2_name = d2["username"] or d2["first_name"] or str(u2_id)
 
-                tasks.append(analyze_pair_groq(d1, d2, u1_name, u2_name, timing))
+                pre_pairs.append((d1, d2, u1_name, u2_name, timing, syntax))
 
+        if not pre_pairs: return []
+
+        # ترتيب الأزواج حسب الخطر الرياضي المبدئي واختيار الأقوى فقط للفحص العميق
+        pre_pairs.sort(key=lambda x: (x[4] + x[5]), reverse=True)
+        final_targets = pre_pairs[:12] # سقف أقصى للفحص العميق لضمان السرعة الصاروخية
+
+        # 4. إرسال الطلبات لـ Groq بالتوازي عبر الـ Async النظيف
+        tasks = [
+            analyze_pair_groq(p[0], p[1], p[2], p[3], p[4], p[5], global_trends)
+            for p in final_targets
+        ]
+        
         results = await asyncio.gather(*tasks)
-
         results_list = list(results)
         results_list.sort(key=lambda x: x["similarity"], reverse=True)
 
-        # عتبة الإدانة ترتفع لـ 45% لضمان الجودة
         suspicious = [r for r in results_list if r["similarity"] >= 45]
-
         if not suspicious:
-            for r in results_list[:top_n]:
-                r["no_suspicious"] = True
+            for r in results_list[:top_n]: r["no_suspicious"] = True
             return results_list[:top_n]
 
         return suspicious[:top_n]
