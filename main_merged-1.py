@@ -1,5 +1,5 @@
 """
-بوت إدارة متكامل — نسخة مدمجة
+بوت إدارة متكامل + كشف الحسابات المتشابهة
 يعمل على جميع الجروبات والقنوات التي يُضاف إليها تلقائياً
 """
 
@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import requests
+import detection   # ملف خارجي يحتوي على منطق الكشف
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -870,6 +871,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_is_admin = await is_tg_admin(context, m.chat.id, uid)
     is_any_admin = rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or tg_is_admin
 
+    # ========== الأوامر الجديدة للكشف ==========
+    if text == "@yas_r7":
+        await m.reply_text("نعم سيدي المالك")
+        return
+
+    if text == "اذن الكشف":
+        await m.reply_text("⚖️ جاري الكشف عن الحسابات الوهمية والمشبوهة...")
+        asyncio.create_task(_run_detection_and_reply(m, context))
+        return
+
+    if text == "كشف الشخص المنتحل":
+        await m.reply_text(
+            "📱 **الرقم المستعمل:** `07714698848`\n"
+            "📱 **الرقم الثاني الأصلي:** `07725666391`",
+            parse_mode="Markdown"
+        )
+        return
+    # ==========================================
+
     # فحص السبام للأعضاء
     if not is_any_admin:
         now = time.time()
@@ -1530,6 +1550,30 @@ async def on_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
+
+# ═══════════════════════════════════════════════
+#          دالة الكشف المساعدة
+# ═══════════════════════════════════════════════
+async def _run_detection_and_reply(msg, context):
+    """تنفيذ عملية الكشف وإرسال النتيجة للمستخدم"""
+    try:
+        top_pairs = await detection.find_top_similar_pairs(max_users=12, top_n=2)
+        if not top_pairs:
+            await msg.reply_text("⚠️ لا توجد بيانات كافية في القناة لإجراء الكشف.")
+            return
+
+        answer = "🔍 **نتائج كشف الحسابات المتشابهة**\n\n"
+        for idx, pair in enumerate(top_pairs, 1):
+            answer += (
+                f"┏━━ **الزوج {idx}**\n"
+                f"┣ 👤 {pair['user1']}  ⇄  {pair['user2']}\n"
+                f"┣ 📊 نسبة التشابه: `{pair['similarity']}%`\n"
+                f"┗ 📝 {pair['report'][:200]}...\n\n"
+            )
+        await msg.reply_text(answer, parse_mode="Markdown")
+    except Exception as e:
+        await msg.reply_text(f"❌ حدث خطأ أثناء الكشف: {str(e)}")
+        logging.error(f"Detection error: {e}")
 
 # ═══════════════════════════════════════════════
 #                   التشغيل
