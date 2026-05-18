@@ -8,7 +8,7 @@ from collections import Counter
 from pyrogram import Client
 
 # ════════════════════════════════════════
-# الإعدادات الفنية (النسخة الإمبراطورية النفاثة)
+# الإعدادات الفنية (النسخة النفاثة المصححة)
 API_ID         = 26604893
 API_HASH       = "b4dad6237531036f1a4bb2580e4985b1"
 SESSION_STRING = "BAGV9V0Af_3r8brUqcEEKfZ0pS6m2mi7vBHXvW-WAeAAd2HCL5xluUtUStq0VslHxtbpgfVKIXRKi9CrWRJWudKeOLA1fHXnwt5c2_hYQiAT2OW4IMrGzWCMrKRrTL2E8yA1AAygPnT7J3jejpylQi0HRavgx-CzlDcBPFB-G6-zgnTi5TKzyuFo9LxpOjV0hjna8nIXHGPX4cgC2QxuD2Dmy8_htVb-uxPIiu5MIcD15ErSyT4mP-A6r3nZb0XAlRaJ9K3CM9a01icSCv19BpFl0QbVtdPvY8zBdRba8aFAAuRBGNYI4akLKKRvHAHXXLMa3dNdLBWOsGBu7UTMn6KCNJgavAAAAAHloT2vAA"
@@ -16,6 +16,9 @@ TARGET_CHANNEL = "clanarba"
 GROQ_API_KEY   = "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"
 
 logging.basicConfig(level=logging.INFO)
+
+# نمط آمن لعد الإيموجيات في بايثون دون ضرب الـ Unicode Range
+EMOJI_REGEX = re.compile(r'[\u2600-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDF00-\uDFFF]|\uD83D[\uDC00-\uDDFF]|\uD83E[\uDD00-\uDFFF]')
 
 # ════════════════════════════════════════
 def _extract_percentage(text: str) -> int:
@@ -36,10 +39,13 @@ def _calculate_syntax_fingerprint(msgs1: list, msgs2: list) -> float:
     if not msgs1 or not msgs2: return 0.0
     
     def get_features(msgs):
-        total_len = sum(len(m) for m in msgs)
+        full_text = "".join(msgs)
+        total_len = len(full_text)
+        if total_len == 0: return 0, 0, 0
+        
         avg_len = total_len / len(msgs)
-        emoji_count = len(re.findall(r'[\u2600-\u1f9ff]', "".join(msgs))) / max(1, total_len)
-        q_count = len(re.findall(r'[؟\?]', "".join(msgs))) / max(1, total_len)
+        emoji_count = len(EMOJI_REGEX.findall(full_text)) / max(1, total_len)
+        q_count = len(re.findall(r'[؟\?]', full_text)) / max(1, total_len)
         return avg_len, emoji_count, q_count
 
     f1 = get_features(msgs1)
@@ -62,43 +68,45 @@ def _calc_timing_overlap(times1: list, times2: list) -> int:
 
 # ════════════════════════════════════════
 async def _collect_members_and_trends(app: Client, limit: int = 10000):
-    """جمع البيانات وتحديد التريندات من آخر 10 آلاف رسالة بسرعة فائقة"""
+    """سحب الـ 10 آلاف رسالة بأقصى سرعة مدعومة من تلجرام"""
     users_data: Dict[int, dict] = {}
     all_words = []
     
-    logging.info(f"بدء سحب {limit} رسالة من القناة/الجروب...")
+    logging.info(f"بدء سحب {limit} رسالة من {TARGET_CHANNEL}...")
     
-    async for msg in app.get_chat_history(TARGET_CHANNEL, limit=limit):
-        u = msg.from_user
-        if not u or u.is_bot: continue
-        uid = u.id
-        if uid not in users_data:
-            users_data[uid] = {"username": u.username or "", "first_name": u.first_name or str(uid), "messages": [], "timestamps": [], "msg_count": 0}
-        
-        if msg.text and len(msg.text.strip()) > 2:
-            txt = msg.text.strip()
-            users_data[uid]["messages"].append(txt)
-            all_words.extend(txt.lower().split())
-        if msg.date:
-            users_data[uid]["timestamps"].append(msg.date.timestamp())
-        users_data[uid]["msg_count"] += 1
+    try:
+        async for msg in app.get_chat_history(TARGET_CHANNEL, limit=limit):
+            u = msg.from_user
+            if not u or u.is_bot: continue
+            uid = u.id
+            if uid not in users_data:
+                users_data[uid] = {"username": u.username or "", "first_name": u.first_name or str(uid), "messages": [], "timestamps": [], "msg_count": 0}
+            
+            if msg.text and len(msg.text.strip()) > 2:
+                txt = msg.text.strip()
+                users_data[uid]["messages"].append(txt)
+                all_words.extend(txt.lower().split())
+            if msg.date:
+                users_data[uid]["timestamps"].append(msg.date.timestamp())
+            users_data[uid]["msg_count"] += 1
+    except Exception as e:
+        logging.error(f"فشل السحب السريع: {e}")
 
-    # رصد الكلمات الأكثر استهلاكاً في الـ 10 آلاف رسالة وحظرها (النسبة تم وزنها طردياً)
     word_counts = Counter(all_words)
     global_trends = set([word for word, count in word_counts.items() if count > (limit * 0.015)]) 
     
-    logging.info(f"اكتمل السحب. تم رصد {len(users_data)} مستخدم نشط.")
+    logging.info(f"اكتمل السحب. تم العثور على {len(users_data)} مستخدم.")
     return users_data, global_trends
 
 # ════════════════════════════════════════
 async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, timing_score: int, syntax_score: float, global_trends: set) -> Dict[str, Any]:
-    clean_text1 = _clean_text_from_trends(data1["messages"], global_trends)[:2000]
-    clean_text2 = _clean_text_from_trends(data2["messages"], global_trends)[:2000]
+    clean_text1 = _clean_text_from_trends(data1["messages"], global_trends)[:1500]
+    clean_text2 = _clean_text_from_trends(data2["messages"], global_trends)[:1500]
 
-    if len(clean_text1) < 30 or len(clean_text2) < 30:
-        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": "غير مشبوه - نصوص غير كافية بعد التطهير."}
+    if len(clean_text1) < 25 or len(clean_text2) < 25:
+        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": "غير مشبوه - النصوص غير كافية."}
 
-    prompt = f"""أنت رئيس الاستخبارات الجنائية الرقمية. أمامك نصوص مأرشفة نظيفة تماماً (بدون كلمات الكلان العامة واليوزرات المستهلكة).
+    prompt = f"""أنت رئيس الاستخبارات الجنائية الرقمية. حلل الأسلوب الباقي الصافي بعد حذف الكلمات المستهلكة بالكلان.
 
 [المشتبه به الأول: {user1}]
 {clean_text1}
@@ -106,15 +114,12 @@ async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, ti
 [المشتبه به الثاني: {user2}]
 {clean_text2}
 
-[التحليل الإحصائي: {syntax_score:.1f}% تشابه هيكلي، {timing_score}% تزامن زمني]
+[التحليل: {syntax_score:.1f}% تشابه هيكلي، {timing_score}% تزامن زمني]
 
-مهمتك:
-قارن الأسلوب الباقي الصافي. إذا لم تجد تلازم لغوي فريد، النسبة 0% فوراً.
-
-أجب بهذا التنسيق الصارم فقط:
+أجب بالتنسيق الصارم التالي:
 نسبة التشابه: [رقم]%
 المؤشرات: [أدلة البصمة العميقة فقط]
-الحكم: [مشبوه جداً (تطابق الحمض اللغوي) / غير مشبوه]"""
+الحكم: [مشبوه جداً / غير مشبوه]"""
 
     url     = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -122,12 +127,12 @@ async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, ti
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
-        "max_tokens": 200 # تقليل الـ tokens لتسريع استجابة الـ API
+        "max_tokens": 150
     }
     try:
-        # تشغيل الـ Request بـ loop مخصص لمنع تجميد البرنامج
         loop = asyncio.get_event_loop()
-        resp = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload, timeout=25))
+        # تقليص الـ timeout لـ 15 ثانية لمنع تعليق الكود نهائياً
+        resp = await loop.run_in_executor(None, lambda: requests.post(url, headers=headers, json=payload, timeout=15))
         result_txt = resp.json()["choices"][0]["message"]["content"]
         ai_pct = _extract_percentage(result_txt)
         
@@ -138,25 +143,21 @@ async def analyze_pair_groq(data1: dict, data2: dict, user1: str, user2: str, ti
             
         return {"user1": user1, "user2": user2, "similarity": final, "ai_score": ai_pct, "timing": timing_score, "report": result_txt}
     except Exception as e:
-        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": f"فشل: {e}"}
+        return {"user1": user1, "user2": user2, "similarity": 0, "ai_score": 0, "timing": timing_score, "report": f"تخطى بسبب المهلة: {e}"}
 
 # ════════════════════════════════════════
-async def find_top_similar_pairs(max_users: int = 15, top_n: int = 3) -> List[Dict[str, Any]]:
-    """الدالة الرئيسية السريعة"""
+async def find_top_similar_pairs(max_users: int = 12, top_n: int = 3) -> List[Dict[str, Any]]:
     async with Client("detect_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING, in_memory=True) as app:
 
-        # 1. سحب الـ 10 آلاف رسالة دفعة واحدة
         all_users, global_trends = await _collect_members_and_trends(app, limit=10000)
-
         if not all_users: return []
 
-        # 2. تصفية الحسابات الأكثر تفاعلاً (صاحبة البصمة الأوضح)
-        active = {uid: d for uid, d in all_users.items() if d["msg_count"] >= 10 and len(d["messages"]) >= 4}
+        # التركيز على الحسابات المتفاعلة جداً لضمان عدم تضييع الوقت في حسابات كتبت كلمة أو كلمتين
+        active = {uid: d for uid, d in all_users.items() if d["msg_count"] >= 15 and len(d["messages"]) >= 5}
         sorted_uids = sorted(active.keys(), key=lambda u: active[u]["msg_count"], reverse=True)[:max_users]
 
         if len(sorted_uids) < 2: return []
 
-        # 3. بناء المقارنات الرياضية السريعة قبل إزعاج الـ AI
         pre_pairs = []
         for i in range(len(sorted_uids)):
             for j in range(i + 1, len(sorted_uids)):
@@ -166,8 +167,8 @@ async def find_top_similar_pairs(max_users: int = 15, top_n: int = 3) -> List[Di
                 timing = _calc_timing_overlap(d1["timestamps"], d2["timestamps"])
                 syntax = _calculate_syntax_fingerprint(d1["messages"], d2["messages"])
                 
-                # تصفية الطائرة (Fly Filter): لو المؤشرات الأولية ميتة، لا تضيع وقت السيرفر
-                if timing < 5 and syntax < 40:
+                # فلتر التصفية الطائرة الصارم جداً لرفع السرعة الصاروخية
+                if timing < 8 and syntax < 45:
                     continue
 
                 u1_name = d1["username"] or d1["first_name"] or str(u1_id)
@@ -177,11 +178,9 @@ async def find_top_similar_pairs(max_users: int = 15, top_n: int = 3) -> List[Di
 
         if not pre_pairs: return []
 
-        # ترتيب الأزواج حسب الخطر الرياضي المبدئي واختيار الأقوى فقط للفحص العميق
         pre_pairs.sort(key=lambda x: (x[4] + x[5]), reverse=True)
-        final_targets = pre_pairs[:12] # سقف أقصى للفحص العميق لضمان السرعة الصاروخية
+        final_targets = pre_pairs[:8] # فحص أعمق لأخطر 8 أزواج فقط لمنع البطء والـ Rate limit
 
-        # 4. إرسال الطلبات لـ Groq بالتوازي عبر الـ Async النظيف
         tasks = [
             analyze_pair_groq(p[0], p[1], p[2], p[3], p[4], p[5], global_trends)
             for p in final_targets
