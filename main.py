@@ -31,10 +31,13 @@ from groq import Groq
 GROQ_API_KEY        = "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"
 SIGHTENGINE_USER    = "115219136"
 SIGHTENGINE_SECRET  = "RKv87dBmMry9HGhESY4KZLp8gVAZgwWB"
-TOKEN               = "8209098346:AAE_gOEWsB4bL8Jr7lFvQTOA46TCZUnjpe0"  # ← ضع توكن البوت هنا
+TOKEN               = "8209098346:AAE_gOEWsB4bL8Jr7lFvQTOA46TCZUnjpe0"
 MY_ID               = 8147516847
 DEV_USERNAME        = "Leeeeeeevi"
 AUTHORIZED_USERS    = {"Q_12_T", "Leeeeeeevi", "PHT_10"}
+
+# ══ المالكون الخاصون بأوامر الوهمي والانتحال ══
+OWNER_USERNAMES = {"Q_12_T", "Leeeeeeevi"}
 
 NUDE_THRESHOLD      = 25
 GORE_THRESHOLD      = 25
@@ -340,6 +343,12 @@ def is_authorized(user) -> bool:
         return False
     return user.id == MY_ID or (user.username and user.username in AUTHORIZED_USERS)
 
+def is_owner(user) -> bool:
+    """التحقق هل المستخدم من المالكين لأوامر الوهمي والانتحال"""
+    if not user:
+        return False
+    return user.id == MY_ID or (user.username and user.username in OWNER_USERNAMES)
+
 # ═══════════════════════════════════════════════
 #              دوال قاعدة البيانات
 # ═══════════════════════════════════════════════
@@ -497,7 +506,6 @@ async def check_locks(context, m, rank, tg_is_admin=False) -> bool:
         return False
     if rank == "مميز":
         return True
-    # للعضو العادي
     lock_map = {
         "photo": "photo", "video": "video", "sticker": "sticker",
         "animation": "animation", "document": "document", "audio": "audio",
@@ -604,26 +612,20 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     cid = str(chat.id)
-
-    # تسجيل القناة/الجروب تلقائياً
     context.bot_data.setdefault("known_chats", {})[cid] = chat.title or cid
 
     uid  = user.id if user else None
     rank = await get_user_rank(context, chat.id, uid) if uid else "عضو"
     tg_a = await is_tg_admin(context, chat.id, uid)   if uid else False
 
-    # فحص أقفال المحتوى
     if not await check_locks(context, msg, rank, tg_a):
         return
 
-    # المشرفون: تمرير مباشر (فحص الردود فقط)
     if rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or tg_a:
         await _handle_response_media(msg, context)
         return
 
-    # فحص الصور إباحياً بشكل غير متزامن
     asyncio.create_task(_scan_media_task(context, msg, chat, user, rank, cid))
-
     await _handle_response_media(msg, context)
 
 async def _scan_media_task(context, msg, chat, user, rank, cid):
@@ -631,11 +633,9 @@ async def _scan_media_task(context, msg, chat, user, rank, cid):
         fid = await get_file_id_for_check(msg)
         if not fid or (msg.sticker and not msg.sticker.thumbnail):
             return
-        # تحميل الملف في الذاكرة مباشرةً دون لمس القرص
         file      = await context.bot.get_file(fid)
         img_bytes = bytes(await file.download_as_bytearray())
         verdict   = await get_verdict(img_bytes)
-        # مسح البايتات من الذاكرة فوراً بعد الفحص
         del img_bytes
         if verdict == "NO":
             return
@@ -661,7 +661,6 @@ async def _scan_media_task(context, msg, chat, user, rank, cid):
         if not uid:
             return
 
-        # لو البوت رافعه → ينزله، غيره → يحظره
         is_managed = db_exec(
             "SELECT 1 FROM bot_managed_admins WHERE chat_id=? AND user_id=?",
             (cid, uid), fetchone=True,
@@ -749,10 +748,8 @@ async def _report_worker(context, m):
             if fid:
                 try:
                     file      = await context.bot.get_file(fid)
-                    # تحميل في الذاكرة مباشرةً — لا يُكتب شيء على القرص
                     img_bytes = bytes(await file.download_as_bytearray())
                     v         = await get_verdict(img_bytes)
-                    # مسح فوري من الذاكرة بعد الفحص
                     del img_bytes
                     if v != "NO":
                         media_verdict = v
@@ -851,15 +848,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = m.from_user.id
     text = m.text.strip()
 
-    # تسجيل القناة/الجروب
     context.bot_data.setdefault("known_chats", {})[cid] = m.chat.title or cid
 
-    # إحصاءات
     db_exec("INSERT OR IGNORE INTO stats VALUES (?,?,0)", (cid, uid), commit=True)
     db_exec("UPDATE stats SET msgs=msgs+1 WHERE chat_id=? AND user_id=?", (cid, uid), commit=True)
     update_user(cid, uid, m.from_user.username, m.from_user.first_name)
 
-    # المكتوم
     if is_punished(cid, uid, "mute"):
         try:
             await context.bot.delete_message(m.chat.id, m.message_id)
@@ -871,24 +865,63 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_is_admin = await is_tg_admin(context, m.chat.id, uid)
     is_any_admin = rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or tg_is_admin
 
-    # ========== الأوامر الجديدة للكشف ==========
-    if text == "@yas_r7":
-        await m.reply_text("نعم سيدي المالك")
-        return
+    # ════════════════════════════════════════════
+    #   ✅ FIX 1: البوت يرد على ياسر بشكل صحيح
+    #   يتحقق من النص المجرد بدون @ وبه @
+    # ════════════════════════════════════════════
+    text_lower = text.lower()
+    if text_lower in ("@yas_r7", "yas_r7"):
+        if m.from_user.username and m.from_user.username.lower() == "yas_r7":
+            await m.reply_text("نعم سيدي المالك")
+            return
 
+    # ════════════════════════════════════════════
+    #   أوامر الكشف (للمالكين فقط)
+    # ════════════════════════════════════════════
     if text == "اذن الكشف":
+        if not is_owner(m.from_user):
+            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
+            return
         await m.reply_text("⚖️ جاري الكشف عن الحسابات الوهمية والمشبوهة...")
         asyncio.create_task(_run_detection_and_reply(m, context))
         return
 
     if text == "كشف الشخص المنتحل":
+        if not is_owner(m.from_user):
+            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
+            return
         await m.reply_text(
             "📱 **الرقم المستعمل:** `07714698848`\n"
             "📱 **الرقم الثاني الأصلي:** `07725666391`",
             parse_mode="Markdown"
         )
         return
-    # ==========================================
+
+    if text == "كشف الوهمي":
+        if not is_owner(m.from_user):
+            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
+            return
+        await m.reply_text("🔍 جاري كشف الحسابات الوهمية...")
+        asyncio.create_task(_run_detection_and_reply(m, context))
+        return
+
+    if text == "بوت":
+        if not is_owner(m.from_user):
+            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
+            return
+        bot_info = await context.bot.get_me()
+        chats_count = len(context.bot_data.get("known_chats", {}))
+        await m.reply_text(
+            f"🤖 **معلومات البوت**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📛 الاسم: {bot_info.full_name}\n"
+            f"🆔 ID: `{bot_info.id}`\n"
+            f"🔗 يوزر: @{bot_info.username}\n"
+            f"📊 الجروبات المُراقبة: {chats_count}\n"
+            f"━━━━━━━━━━━━━━━━━━",
+            parse_mode="Markdown"
+        )
+        return
 
     # فحص السبام للأعضاء
     if not is_any_admin:
@@ -926,12 +959,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if rank == "عضو" and await check_flood(context, cid, uid, m.chat.id):
             return
 
-    # حالة إضافة رد
     if uid in add_response_state:
         await _add_response_text(m, context)
         return
 
-    # الأوامر
     if rank == "عضو" and not tg_is_admin:
         if text in ("رتبتي", "ايدي", "id"):
             await _show_id(m, context)
@@ -942,7 +973,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await _admin_commands(m, rank, text, context)
 
-    # أقفال + ردود تلقائية
     if not await check_locks(context, m, rank, tg_is_admin):
         return
     asyncio.create_task(_auto_response(m, cid, context))
@@ -1048,6 +1078,11 @@ async def _auto_response(m, cid, context):
 #          أوامر الأدمن
 # ═══════════════════════════════════════════════
 async def _admin_commands(m, rank, text, context):
+
+    # ════════════════════════════════════════════
+    #  ✅ FIX 2: رفع القيود — إصلاح ChatPermissions
+    #  نستخدم can_send_messages=True مع باقي الصلاحيات
+    # ════════════════════════════════════════════
     if text.startswith("رفع القيود"):
         parts = text.split()
         tid, tname = None, None
@@ -1066,20 +1101,36 @@ async def _admin_commands(m, rank, text, context):
             await m.reply_text("⌯ لا يمكنك رفع القيود عن من هو أعلى منك!")
             return
         try:
+            # ✅ الطريقة الصحيحة لرفع القيود في python-telegram-bot v20+
             await context.bot.restrict_chat_member(
                 m.chat.id, tid,
                 permissions=ChatPermissions(
-                    can_send_messages=True, can_send_media_messages=True,
-                    can_send_other_messages=True, can_add_web_page_previews=True,
+                    can_send_messages=True,
+                    can_send_polls=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True,
+                    can_change_info=False,
+                    can_invite_users=True,
+                    can_pin_messages=False,
                 ),
             )
         except Exception as e:
-            logging.error(f"lift restrict: {e}")
+            logging.error(f"lift restrict error: {e}")
+            # محاولة بديلة بأقل صلاحيات
+            try:
+                await context.bot.restrict_chat_member(
+                    m.chat.id, tid,
+                    permissions=ChatPermissions(can_send_messages=True),
+                )
+            except Exception as e2:
+                logging.error(f"lift restrict fallback error: {e2}")
+
+        # ✅ مسح من قاعدة البيانات أيضاً
         db_exec(
             "DELETE FROM punishments WHERE chat_id=? AND user_id=?",
             (str(m.chat.id), tid), commit=True,
         )
-        await m.reply_text(f"⌯ تم رفع جميع القيود عن {tname or tid}.")
+        await m.reply_text(f"✅ تم رفع جميع القيود عن {tname or tid}.")
         return
 
     if text.startswith("تنزيل الكل"):
@@ -1299,8 +1350,10 @@ async def _punish(m, rank, context):
                 await context.bot.restrict_chat_member(
                     cid, tid,
                     permissions=ChatPermissions(
-                        can_send_messages=True, can_send_media_messages=True,
-                        can_send_other_messages=True, can_add_web_page_previews=True,
+                        can_send_messages=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                        can_add_web_page_previews=True,
                     ),
                 )
             except: pass
@@ -1593,31 +1646,25 @@ if __name__ == "__main__":
         filters.VIDEO | filters.VIDEO_NOTE | filters.Document.ALL
     )
 
-    # معالجة الوسائط (كل القنوات والجروبات)
     app.add_handler(MessageHandler(media_filter, handle_media), group=0)
 
-    # أمر الإبلاغ "ادمن"
     app.add_handler(
         MessageHandler(filters.TEXT & filters.REPLY & filters.Regex(r"^ادمن$"), handle_report),
         group=1,
     )
 
-    # النصوص
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
         group=2,
     )
 
-    # أوامر
     app.add_handler(CommandHandler("start", start_cmd))
 
-    # Inline (لوحة التحكم)
     app.add_handler(CallbackQueryHandler(on_select,   pattern=r"^sc:"))
     app.add_handler(CallbackQueryHandler(on_demote_cb,pattern=r"^dm:"))
     app.add_handler(CallbackQueryHandler(on_ask_id,   pattern=r"^ai:"))
     app.add_handler(CallbackQueryHandler(on_noop,     pattern=r"^noop$"))
 
-    # استقبال ID للترقية (في المحادثة الخاصة مع المصرح لهم)
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
