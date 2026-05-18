@@ -911,14 +911,56 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         bot_info = await context.bot.get_me()
         chats_count = len(context.bot_data.get("known_chats", {}))
+        owner_name = m.from_user.first_name or "سيدي المالك"
         await m.reply_text(
+            f"أهلاً بك سيدي **{owner_name}** 👑\n\n"
             f"🤖 **معلومات البوت**\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📛 الاسم: {bot_info.full_name}\n"
             f"🆔 ID: `{bot_info.id}`\n"
             f"🔗 يوزر: @{bot_info.username}\n"
             f"📊 الجروبات المُراقبة: {chats_count}\n"
-            f"━━━━━━━━━━━━━━━━━━",
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"📋 **أوامر الإدارة:**\n"
+            f"┣ `رفع [رتبة] @يوزر` — رفع رتبة عضو\n"
+            f"┣ `تنزيل [رتبة] @يوزر` — تنزيل رتبة عضو\n"
+            f"┣ `تنزيل الكل @يوزر` — تنزيله لعضو عادي\n"
+            f"┣ `حظر @يوزر` — حظر عضو نهائي\n"
+            f"┣ `تقييد @يوزر [مدة]` — تقييد عضو\n"
+            f"┣ `كتم @يوزر [مدة]` — كتم عضو\n"
+            f"┣ `طرد @يوزر` — طرد عضو\n"
+            f"┣ `رفع القيود @يوزر` — رفع جميع القيود\n"
+            f"┣ `الغاء حظر @يوزر` — إلغاء الحظر\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔒 **أوامر الأقفال:**\n"
+            f"┣ `قفل الصور` / `فتح الصور`\n"
+            f"┣ `قفل الفيديو` / `فتح الفيديو`\n"
+            f"┣ `قفل الملصقات` / `فتح الملصقات`\n"
+            f"┣ `قفل الروابط` / `فتح الروابط`\n"
+            f"┣ `قفل الكل` / `فتح الكل`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"💬 **أوامر الردود:**\n"
+            f"┣ `اضف رد` — إضافة رد تلقائي\n"
+            f"┣ `الردود` — عرض الردود\n"
+            f"┣ `مسح رد [كلمة]` — حذف رد\n"
+            f"┣ `مسح الردود` — حذف كل الردود\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 **أوامر الكشف (للمالكين):**\n"
+            f"┣ `اذن الكشف` — كشف الحسابات الوهمية\n"
+            f"┣ `كشف الوهمي` — نفس الأمر\n"
+            f"┣ `كشف الشخص المنتحل` — بيانات المنتحل\n"
+            f"┣ `كشف @يوزر` — معلومات عضو\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📊 **أوامر عامة:**\n"
+            f"┣ `ايدي` / `id` — معرفة الايدي\n"
+            f"┣ `رتبتي` — معرفة رتبتك\n"
+            f"┣ `رتبته @يوزر` — رتبة عضو\n"
+            f"┣ `ادمن` (رد على رسالة) — بلاغ\n"
+            f"┣ `مسح [عدد]` — مسح رسائل\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📜 **قوائم الرتب:**\n"
+            f"┣ `المشرفين` · `الادمنيه` · `المدراء`\n"
+            f"┗ `المالكيين` · `المميزين`",
             parse_mode="Markdown"
         )
         return
@@ -1610,22 +1652,77 @@ async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _run_detection_and_reply(msg, context):
     """تنفيذ عملية الكشف وإرسال النتيجة للمستخدم"""
     try:
-        top_pairs = await detection.find_top_similar_pairs(max_users=12, top_n=2)
+        top_pairs = await detection.find_top_similar_pairs(max_users=15, top_n=3)
+
         if not top_pairs:
-            await msg.reply_text("⚠️ لا توجد بيانات كافية في القناة لإجراء الكشف.")
+            await msg.reply_text(
+                "⚠️ لا توجد بيانات كافية\n\n"
+                "تأكد أن:\n"
+                "• القناة clanarba تحتوي على رسائل\n"
+                "• الأعضاء أرسلوا أكثر من 10 رسائل\n"
+                "• الجلسة SESSION_STRING صحيحة"
+            )
             return
 
-        answer = "🔍 **نتائج كشف الحسابات المتشابهة**\n\n"
-        for idx, pair in enumerate(top_pairs, 1):
-            answer += (
-                f"┏━━ **الزوج {idx}**\n"
-                f"┣ 👤 {pair['user1']}  ⇄  {pair['user2']}\n"
-                f"┣ 📊 نسبة التشابه: `{pair['similarity']}%`\n"
-                f"┗ 📝 {pair['report'][:200]}...\n\n"
+        # ══ هل كل النتائج غير مشبوهة؟ ══
+        all_clean = all(pair.get("no_suspicious") for pair in top_pairs)
+
+        if all_clean:
+            answer = (
+                "✅ نتيجة الكشف: لا توجد حسابات مشبوهة\n\n"
+                "لم يُكتشف أي تشابه واضح بين أعضاء القناة.\n"
+                f"تم فحص {len(top_pairs)} زوج — أعلى نسبة: {top_pairs[0]['similarity']}%\n\n"
+                "(الحد الأدنى للاشتباه: 20%)"
             )
-        await msg.reply_text(answer, parse_mode="Markdown")
+            await msg.reply_text(answer)
+            return
+
+        answer = "🔍 نتائج كشف الحسابات المشبوهة\n"
+        answer += "━━━━━━━━━━━━━━━━━━\n\n"
+
+        for idx, pair in enumerate(top_pairs, 1):
+            sim    = pair['similarity']
+            timing = pair.get('timing', 0)
+
+            if sim >= 70:
+                level = "🔴 خطر عالٍ"
+            elif sim >= 40:
+                level = "🟠 مشبوه"
+            else:
+                level = "🟡 تحت المراقبة"
+
+            # تنظيف التقرير من أي رموز Markdown تسبب مشكلة
+            report_text = pair['report']
+            report_lines = [
+                ln for ln in report_text.splitlines()
+                if not ln.strip().startswith("نسبة التشابه:")
+            ]
+            clean_report = "\n".join(report_lines).strip()[:300]
+            # إزالة الرموز الخاصة التي تكسر Markdown
+            for ch in ["*", "_", "`", "[", "]", "(", ")"]:
+                clean_report = clean_report.replace(ch, "")
+
+            u1 = str(pair['user1']).replace("`","")
+            u2 = str(pair['user2']).replace("`","")
+
+            answer += (
+                f"┏━━ الزوج {idx} — {level}\n"
+                f"┣ 👤 {u1}  ⇄  {u2}\n"
+                f"┣ 📊 نسبة التشابه: {sim}%\n"
+                f"┣ ⏱ التشابه الزمني: {timing}%\n"
+                f"┗ 📝 {clean_report}\n\n"
+            )
+
+        answer += "━━━━━━━━━━━━━━━━━━\n"
+        answer += "⚠️ هذه نتائج مساعدة، القرار النهائي للإدارة"
+
+        await msg.reply_text(answer)
+
     except Exception as e:
-        await msg.reply_text(f"❌ حدث خطأ أثناء الكشف: {str(e)}")
+        await msg.reply_text(
+            f"❌ خطأ أثناء الكشف:\n{str(e)}\n\n"
+            "تحقق من صحة SESSION_STRING وأن القناة موجودة."
+        )
         logging.error(f"Detection error: {e}")
 
 # ═══════════════════════════════════════════════
