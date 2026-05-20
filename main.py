@@ -34,10 +34,10 @@ SIGHTENGINE_SECRET  = "RKv87dBmMry9HGhESY4KZLp8gVAZgwWB"
 TOKEN               = "8209098346:AAE_gOEWsB4bL8Jr7lFvQTOA46TCZUnjpe0"
 MY_ID               = 8147516847
 DEV_USERNAME        = "Leeeeeeevi"
-AUTHORIZED_USERS    = {"Q_12_T", "Leeeeeeevi", "PHT_10"}
+AUTHORIZED_USERS    = {"Q_12_T", "Leeeeeeevi", "PHT_10", "yas_r7"}
 
 # ══ المالكون الخاصون بأوامر الوهمي والانتحال ══
-OWNER_USERNAMES = {"Q_12_T", "Leeeeeeevi"}
+OWNER_USERNAMES = {"Q_12_T", "Leeeeeeevi", "yas_r7"}
 
 NUDE_THRESHOLD      = 25
 GORE_THRESHOLD      = 25
@@ -727,13 +727,20 @@ async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_report_worker(context, m))
 
 async def _report_worker(context, m):
+    """
+    دالة الإبلاغ — تعمل بصمت تام:
+    - تحلل الرسالة المُبلَّغ عنها
+    - إذا كانت مخالفة: تنتظر 5 دقائق بصمت، ثم تتحقق هل عوقب العضو
+      • إذا عوقب: لا تفعل شيئاً ولا ترسل أي رسالة
+      • إذا لم يُعاقَب: تنفذ العقوبة مباشرة بدون أي رسالة
+    - إذا كان البلاغ غير دقيق أو المُبلِّغ غير معني: تقيّد المُبلِّغ بصمت
+    """
     try:
         target      = m.reply_to_message
         cid         = m.chat.id
         reporter_id = m.from_user.id
 
         if target.from_user.id == reporter_id:
-            await context.bot.send_message(cid, "⚠️ لا يمكنك الإبلاغ عن نفسك.")
             return
 
         rep_rank         = await get_user_rank(context, cid, reporter_id)
@@ -767,10 +774,12 @@ async def _report_worker(context, m):
 
         matched = decision if decision in RULES else None
 
+        # ══ التحقق من أن المُبلِّغ معني بالرسالة ══
         if not is_reporter_admin:
             directed  = await is_directed_at_reporter(context, target, reporter_id)
             is_global = matched in GLOBAL_VIOLATIONS if matched else False
             if not directed and not is_global:
+                # تقييد المُبلِّغ بصمت
                 until_ts = int(time.time()) + 1800
                 try:
                     await context.bot.restrict_chat_member(
@@ -785,35 +794,24 @@ async def _report_worker(context, m):
                     )
                 except Exception as e:
                     logging.error(f"restrict reporter: {e}")
-                name = m.from_user.first_name or str(reporter_id)
-                await context.bot.send_message(
-                    cid, f"⚠️ {name} ليس معنياً بهذه الرسالة. تم تقييده 30 دقيقة."
-                )
                 return
 
         if matched:
-            await context.bot.send_message(
-                cid,
-                f"⚠️ مخالفة مكتشفة: **{matched}**\n⏳ انتظار 5 دقائق لتدخل الأدمن...",
-                parse_mode="Markdown",
-            )
+            # ══ انتظار 5 دقائق بصمت بدون أي رسالة ══
             await asyncio.sleep(300)
 
+            # ══ التحقق هل عوقب العضو من الأدمنيه ══
             if await already_punished(context, str(cid), target.from_user.id):
-                await context.bot.send_message(cid, "✅ تمت معاقبة العضو من قِبل الأدمنيه.")
+                # عوقب → لا نفعل شيئاً ولا نرسل أي رسالة
+                return
             else:
+                # لم يُعاقَب → ننفذ العقوبة بصمت بدون أي رسالة
                 try:
                     await do_punish(context, str(cid), target.from_user.id, matched)
-                    dur = fmt_duration(RULES[matched].get("time") or 0)
-                    typ = "حظر" if RULES[matched]["type"] == "ban" else "تقييد"
-                    await context.bot.send_message(
-                        cid,
-                        f"🤖 لم يتصرف الأدمن. نُفِّذت عقوبة **{matched}** ({typ} {dur})",
-                        parse_mode="Markdown",
-                    )
                 except TelegramError:
-                    await context.bot.send_message(cid, "⚠️ لا يمكنني معاقبة أدمن.")
+                    pass
         else:
+            # ══ بلاغ غير دقيق ══
             if not is_reporter_admin:
                 until_ts = int(time.time()) + 1800
                 try:
@@ -829,9 +827,6 @@ async def _report_worker(context, m):
                     )
                 except:
                     pass
-                await context.bot.send_message(cid, "⚠️ بلاغ غير دقيق. تم تقييدك 30 دقيقة.")
-            else:
-                await context.bot.send_message(cid, "⚠️ البلاغ غير دقيق، وبما أنك أدمن فلن تُقيد.")
 
     except Exception as e:
         logging.error(f"_report_worker: {e}")
@@ -865,10 +860,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_is_admin = await is_tg_admin(context, m.chat.id, uid)
     is_any_admin = rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or tg_is_admin
 
-    # ════════════════════════════════════════════
-    #   ✅ FIX 1: البوت يرد على ياسر بشكل صحيح
-    #   يتحقق من النص المجرد بدون @ وبه @
-    # ════════════════════════════════════════════
     text_lower = text.lower()
     if text_lower in ("@yas_r7", "yas_r7"):
         if m.from_user.username and m.from_user.username.lower() == "yas_r7":
@@ -1121,10 +1112,6 @@ async def _auto_response(m, cid, context):
 # ═══════════════════════════════════════════════
 async def _admin_commands(m, rank, text, context):
 
-    # ════════════════════════════════════════════
-    #  ✅ FIX 2: رفع القيود — إصلاح ChatPermissions
-    #  نستخدم can_send_messages=True مع باقي الصلاحيات
-    # ════════════════════════════════════════════
     if text.startswith("رفع القيود"):
         parts = text.split()
         tid, tname = None, None
@@ -1143,7 +1130,6 @@ async def _admin_commands(m, rank, text, context):
             await m.reply_text("⌯ لا يمكنك رفع القيود عن من هو أعلى منك!")
             return
         try:
-            # ✅ الطريقة الصحيحة لرفع القيود في python-telegram-bot v20+
             await context.bot.restrict_chat_member(
                 m.chat.id, tid,
                 permissions=ChatPermissions(
@@ -1158,7 +1144,6 @@ async def _admin_commands(m, rank, text, context):
             )
         except Exception as e:
             logging.error(f"lift restrict error: {e}")
-            # محاولة بديلة بأقل صلاحيات
             try:
                 await context.bot.restrict_chat_member(
                     m.chat.id, tid,
@@ -1167,7 +1152,6 @@ async def _admin_commands(m, rank, text, context):
             except Exception as e2:
                 logging.error(f"lift restrict fallback error: {e2}")
 
-        # ✅ مسح من قاعدة البيانات أيضاً
         db_exec(
             "DELETE FROM punishments WHERE chat_id=? AND user_id=?",
             (str(m.chat.id), tid), commit=True,
@@ -1664,7 +1648,6 @@ async def _run_detection_and_reply(msg, context):
             )
             return
 
-        # ══ هل كل النتائج غير مشبوهة؟ ══
         all_clean = all(pair.get("no_suspicious") for pair in top_pairs)
 
         if all_clean:
@@ -1691,14 +1674,12 @@ async def _run_detection_and_reply(msg, context):
             else:
                 level = "🟡 تحت المراقبة"
 
-            # تنظيف التقرير من أي رموز Markdown تسبب مشكلة
             report_text = pair['report']
             report_lines = [
                 ln for ln in report_text.splitlines()
                 if not ln.strip().startswith("نسبة التشابه:")
             ]
             clean_report = "\n".join(report_lines).strip()[:300]
-            # إزالة الرموز الخاصة التي تكسر Markdown
             for ch in ["*", "_", "`", "[", "]", "(", ")"]:
                 clean_report = clean_report.replace(ch, "")
 
