@@ -1082,9 +1082,12 @@ async def _report_worker(context, m):
                     pass
         else:
             if not is_reporter_admin:
-                until_ts = safe_until_ts(1800)  # already replaced
-                         datetime.fromtimestamp(until_ts).isoformat()), commit=True,
-                    )
+                until_ts = safe_until_ts(
+    1800, 
+    datetime.fromtimestamp(until_ts).isoformat(), 
+    commit=True,
+)
+
 
                 except:
                     pass
