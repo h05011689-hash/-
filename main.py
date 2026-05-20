@@ -1,6 +1,10 @@
 """
 بوت إدارة متكامل + كشف الحسابات المتشابهة
 يعمل على جميع الجروبات والقنوات التي يُضاف إليها تلقائياً
+
+التعديلات:
+- يتجاهل أي أحداث حدثت قبل تشغيل البوت
+- يحفظ المحظورين والمقيدين الموجودين مسبقاً في كل مجموعة عند بدء التشغيل
 """
 
 import asyncio
@@ -44,6 +48,9 @@ GORE_THRESHOLD      = 25
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 executor    = ThreadPoolExecutor(max_workers=20)
+
+# ══ وقت بدء تشغيل البوت — أي حدث قبل هذا الوقت يُتجاهل ══
+BOT_START_TIME = int(time.time())
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -147,6 +154,12 @@ def _init_db():
         chat_id TEXT, user_id INTEGER,
         PRIMARY KEY (chat_id, user_id)
     );
+    CREATE TABLE IF NOT EXISTS preexisting_punishments (
+        chat_id TEXT, user_id INTEGER, type TEXT,
+        until TIMESTAMP, username TEXT, first_name TEXT,
+        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (chat_id, user_id, type)
+    );
     """)
 
 _init_db()
@@ -155,6 +168,159 @@ _init_db()
 user_message_times  = {}
 add_response_state  = {}
 spam_tracker        = defaultdict(lambda: defaultdict(list))
+
+# ═══════════════════════════════════════════════
+#   تجاهل الأحداث القديمة قبل تشغيل البوت
+# ═══════════════════════════════════════════════
+def is_old_update(update: Update) -> bool:
+    """يرجع True إذا كان الحدث حدث قبل تشغيل البوت — يُتجاهل"""
+    msg = update.effective_message
+    if msg and msg.date:
+        msg_ts = int(msg.date.timestamp())
+        if msg_ts < BOT_START_TIME:
+            return True
+    # فحص callback_query أيضاً
+    if update.callback_query and update.callback_query.message:
+        msg_ts = int(update.callback_query.message.date.timestamp())
+        if msg_ts < BOT_START_TIME:
+            return True
+    return False
+
+# ═══════════════════════════════════════════════
+#   حفظ المحظورين والمقيدين الموجودين مسبقاً
+# ═══════════════════════════════════════════════
+async def snapshot_existing_restrictions(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    """
+    عند أول رسالة من مجموعة — يجلب قائمة الأعضاء المحظورين والمقيدين
+    ويحفظهم في جدول preexisting_punishments قبل أي تعديل من البوت
+    """
+    cid = str(chat_id)
+    
+    # تحقق هل سبق وسجلنا هذه المجموعة
+    already = db_exec(
+        "SELECT 1 FROM preexisting_punishments WHERE chat_id=? LIMIT 1",
+        (cid,), fetchone=True
+    )
+    # نستخدم علامة في bot_data لتفادي الجلب مرتين
+    snapped = context.bot_data.setdefault("snapped_chats", set())
+    if cid in snapped:
+        return
+    snapped.add(cid)
+
+    logging.info(f"📸 بدء تسجيل القيود الموجودة مسبقاً في {chat_id}")
+    try:
+        # نحاول جلب الأعضاء المحظورين (kicked) والمقيدين (restricted)
+        # لا يدعم Telegram API جلب كل المقيدين مباشرة، لكن يمكن جلب قائمة الأعضاء
+        # سنعتمد على getChatMember لأعضاء موجودين في قاعدة البيانات + ما يتم اكتشافه لاحقاً
+
+        # جلب الأعضاء الموجودين في قاعدة بياناتنا وفحص حالتهم
+        known_users = db_exec(
+            "SELECT user_id, username, first_name FROM users WHERE chat_id=?",
+            (cid,), fetchall=True
+        ) or []
+
+        now_iso = datetime.now().isoformat()
+        far_future = (datetime.now() + timedelta(days=3650)).isoformat()
+
+        for (uid, username, first_name) in known_users:
+            try:
+                member = await context.bot.get_chat_member(chat_id, uid)
+                if member.status == "kicked":
+                    db_exec(
+                        "INSERT OR IGNORE INTO preexisting_punishments "
+                        "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
+                        (cid, uid, "ban", far_future, username or "", first_name or ""),
+                        commit=True
+                    )
+                    # أيضاً نسجله في جدول punishments لو لم يكن موجوداً
+                    db_exec(
+                        "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
+                        (cid, uid, "ban", far_future), commit=True
+                    )
+                    logging.info(f"  ← محظور مسبقاً: {uid} في {chat_id}")
+
+                elif member.status == "restricted":
+                    # تحديد وقت انتهاء القيد
+                    if member.until_date:
+                        until_iso = member.until_date.isoformat()
+                    else:
+                        until_iso = far_future
+
+                    db_exec(
+                        "INSERT OR IGNORE INTO preexisting_punishments "
+                        "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
+                        (cid, uid, "restrict", until_iso, username or "", first_name or ""),
+                        commit=True
+                    )
+                    db_exec(
+                        "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
+                        (cid, uid, "restrict", until_iso), commit=True
+                    )
+                    logging.info(f"  ← مقيد مسبقاً: {uid} في {chat_id}")
+
+            except TelegramError:
+                pass
+            except Exception as e:
+                logging.error(f"snapshot member {uid}: {e}")
+
+        logging.info(f"✅ انتهى تسجيل القيود في {chat_id}")
+
+    except Exception as e:
+        logging.error(f"snapshot_existing_restrictions: {e}")
+
+
+async def register_member_restriction(context, chat_id, user_id):
+    """
+    عند أول ظهور لعضو جديد — تحقق من حالته وسجل لو كان مقيداً/محظوراً
+    هذا يغطي الأعضاء الذين لم يرسلوا رسائل من قبل
+    """
+    cid = str(chat_id)
+    # لو مسجل بالفعل تجاهل
+    exists = db_exec(
+        "SELECT 1 FROM preexisting_punishments WHERE chat_id=? AND user_id=?",
+        (cid, user_id), fetchone=True
+    )
+    if exists:
+        return
+
+    # أيضاً تجاهل لو البوت سجّله هو (في جدول punishments بعد BOT_START_TIME)
+    # سنتحقق فقط من الحالة الحالية على تيليجرام
+    try:
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        far_future = (datetime.now() + timedelta(days=3650)).isoformat()
+
+        if member.status == "kicked":
+            db_exec(
+                "INSERT OR IGNORE INTO preexisting_punishments "
+                "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
+                (cid, user_id, "ban", far_future,
+                 member.user.username or "", member.user.first_name or ""),
+                commit=True
+            )
+            db_exec(
+                "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
+                (cid, user_id, "ban", far_future), commit=True
+            )
+
+        elif member.status == "restricted":
+            if member.until_date:
+                until_iso = member.until_date.isoformat()
+            else:
+                until_iso = far_future
+            db_exec(
+                "INSERT OR IGNORE INTO preexisting_punishments "
+                "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
+                (cid, user_id, "restrict", until_iso,
+                 member.user.username or "", member.user.first_name or ""),
+                commit=True
+            )
+            db_exec(
+                "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
+                (cid, user_id, "restrict", until_iso), commit=True
+            )
+
+    except Exception:
+        pass
 
 # ═══════════════════════════════════════════════
 #              دوال الوقت
@@ -604,6 +770,10 @@ async def _demote_admin(context, chat_id, user_id):
 #          معالجة الوسائط (صور/فيديو/ملصقات)
 # ═══════════════════════════════════════════════
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ══ تجاهل الأحداث القديمة ══
+    if is_old_update(update):
+        return
+
     msg  = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
@@ -614,9 +784,16 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = str(chat.id)
     context.bot_data.setdefault("known_chats", {})[cid] = chat.title or cid
 
+    # تسجيل القيود الموجودة مسبقاً في هذه المجموعة
+    asyncio.create_task(snapshot_existing_restrictions(context, chat.id))
+
     uid  = user.id if user else None
     rank = await get_user_rank(context, chat.id, uid) if uid else "عضو"
     tg_a = await is_tg_admin(context, chat.id, uid)   if uid else False
+
+    # تسجيل حالة العضو لو لم يُسجَّل بعد
+    if uid:
+        asyncio.create_task(register_member_restriction(context, chat.id, uid))
 
     if not await check_locks(context, msg, rank, tg_a):
         return
@@ -721,6 +898,10 @@ async def _handle_response_media(msg, context):
 #          أمر "ادمن" (الإبلاغ)
 # ═══════════════════════════════════════════════
 async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ══ تجاهل الأحداث القديمة ══
+    if is_old_update(update):
+        return
+
     m = update.effective_message
     if not m or not m.text or m.text.strip() != "ادمن" or not m.reply_to_message:
         return
@@ -779,7 +960,6 @@ async def _report_worker(context, m):
             directed  = await is_directed_at_reporter(context, target, reporter_id)
             is_global = matched in GLOBAL_VIOLATIONS if matched else False
             if not directed and not is_global:
-                # تقييد المُبلِّغ بصمت
                 until_ts = int(time.time()) + 1800
                 try:
                     await context.bot.restrict_chat_member(
@@ -797,21 +977,15 @@ async def _report_worker(context, m):
                 return
 
         if matched:
-            # ══ انتظار 5 دقائق بصمت بدون أي رسالة ══
             await asyncio.sleep(300)
-
-            # ══ التحقق هل عوقب العضو من الأدمنيه ══
             if await already_punished(context, str(cid), target.from_user.id):
-                # عوقب → لا نفعل شيئاً ولا نرسل أي رسالة
                 return
             else:
-                # لم يُعاقَب → ننفذ العقوبة بصمت بدون أي رسالة
                 try:
                     await do_punish(context, str(cid), target.from_user.id, matched)
                 except TelegramError:
                     pass
         else:
-            # ══ بلاغ غير دقيق ══
             if not is_reporter_admin:
                 until_ts = int(time.time()) + 1800
                 try:
@@ -835,6 +1009,10 @@ async def _report_worker(context, m):
 #          معالج النصوص الرئيسي
 # ═══════════════════════════════════════════════
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ══ تجاهل الأحداث القديمة ══
+    if is_old_update(update):
+        return
+
     m = update.effective_message
     if not m or not m.text:
         return
@@ -844,6 +1022,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = m.text.strip()
 
     context.bot_data.setdefault("known_chats", {})[cid] = m.chat.title or cid
+
+    # تسجيل القيود الموجودة مسبقاً في هذه المجموعة (مرة واحدة فقط)
+    asyncio.create_task(snapshot_existing_restrictions(context, m.chat.id))
+
+    # تسجيل حالة هذا العضو بالذات
+    asyncio.create_task(register_member_restriction(context, m.chat.id, uid))
 
     db_exec("INSERT OR IGNORE INTO stats VALUES (?,?,0)", (cid, uid), commit=True)
     db_exec("UPDATE stats SET msgs=msgs+1 WHERE chat_id=? AND user_id=?", (cid, uid), commit=True)
@@ -1152,8 +1336,13 @@ async def _admin_commands(m, rank, text, context):
             except Exception as e2:
                 logging.error(f"lift restrict fallback error: {e2}")
 
+        # حذف من جدول punishments وأيضاً من preexisting_punishments
         db_exec(
             "DELETE FROM punishments WHERE chat_id=? AND user_id=?",
+            (str(m.chat.id), tid), commit=True,
+        )
+        db_exec(
+            "DELETE FROM preexisting_punishments WHERE chat_id=? AND user_id=?",
             (str(m.chat.id), tid), commit=True,
         )
         await m.reply_text(f"✅ تم رفع جميع القيود عن {tname or tid}.")
@@ -1366,6 +1555,8 @@ async def _punish(m, rank, context):
             except: pass
             db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='ban'",
                     (cid, tid), commit=True)
+            db_exec("DELETE FROM preexisting_punishments WHERE chat_id=? AND user_id=? AND type='ban'",
+                    (cid, tid), commit=True)
             await m.reply_text(f"⌯ تم إلغاء حظر {disp}")
         elif "كتم" in text:
             db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='mute'",
@@ -1384,6 +1575,8 @@ async def _punish(m, rank, context):
                 )
             except: pass
             db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='restrict'",
+                    (cid, tid), commit=True)
+            db_exec("DELETE FROM preexisting_punishments WHERE chat_id=? AND user_id=? AND type='restrict'",
                     (cid, tid), commit=True)
             await m.reply_text(f"⌯ تم إلغاء تقييد {disp}")
         return
@@ -1540,6 +1733,10 @@ async def _lists(m, rank, context):
 #     لوحة التحكم: رفع/تنزيل المشرفين (Inline)
 # ═══════════════════════════════════════════════
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ══ تجاهل الأحداث القديمة ══
+    if is_old_update(update):
+        return
+
     user = update.effective_user
     if not is_authorized(user):
         return
@@ -1615,6 +1812,10 @@ async def on_ask_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def on_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ══ تجاهل الأحداث القديمة ══
+    if is_old_update(update):
+        return
+
     if not is_authorized(update.effective_user):
         return
     if "await_promote_cid" not in context.user_data:
@@ -1751,5 +1952,12 @@ if __name__ == "__main__":
         group=3,
     )
 
-    print("🚀 البوت المدمج يعمل — يراقب جميع الجروبات والقنوات تلقائياً ⚡")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    print(f"🚀 البوت يعمل — وقت البدء: {datetime.fromtimestamp(BOT_START_TIME)}")
+    print("⏩ أي حدث قبل هذا الوقت سيُتجاهل تلقائياً")
+    print("📸 سيتم تسجيل المحظورين والمقيدين عند أول رسالة من كل مجموعة")
+
+    # drop_pending_updates=True يضمن تجاهل أي updates متراكمة قبل التشغيل
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+    )
