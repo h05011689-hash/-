@@ -1077,15 +1077,24 @@ async def _report_worker(context, m):
                 return
             else:
                 try:
-                    await do_punish(context, str(cid), target.from_user.id, matched)
+                            await do_punish(context, str(cid), target.from_user.id, matched)
                 except TelegramError:
                     pass
         else:
             if not is_reporter_admin:
-                until_ts = safe_until_ts(
-    1800, 
-    datetime.fromtimestamp(until_ts).isoformat(), 
-    commit=True,
+                # 1. نحسب الوقت بالثواني أولاً ونخزنه في المتغير
+                until_ts = safe_until_ts(1800)
+                
+                # 2. نستدعي دالة العقاب ونمرر لها الوقت والـ commit بمحاذاة صحيحة
+                await do_punish(
+                    context, 
+                    str(cid), 
+                    target.from_user.id, 
+                    matched, 
+                    until=datetime.fromtimestamp(until_ts).isoformat(), 
+                    commit=True
+                )
+
 )
 
 
