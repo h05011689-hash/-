@@ -52,20 +52,6 @@ executor    = ThreadPoolExecutor(max_workers=20)
 # ══ وقت بدء تشغيل البوت — أي حدث قبل هذا الوقت يُتجاهل ══
 BOT_START_TIME = int(time.time())
 
-# ═══════════════════════════════════════════════
-#   إصلاح مشكلة تيليجرام مع مدة التقييد
-#   تيليجرام يتجاهل until_date لو أقل من 30 ثانية
-#   أو أكثر من 366 يوم — نضيف 35 ثانية margin
-# ═══════════════════════════════════════════════
-def safe_until_ts(seconds: int) -> int:
-    """يحسب until_date صحيح يضمن تنفيذ المدة كاملة"""
-    MIN_MARGIN = 35  # ثانية إضافية فوق الـ 30 ثانية المطلوبة من تيليجرام
-    MAX_SECS   = 366 * 24 * 3600 - 60  # أقصى مدة مسموحة
-    duration   = max(seconds + MIN_MARGIN, 60)  # على الأقل دقيقة
-    duration   = min(duration, MAX_SECS)
-    return int(time.time()) + duration
-
-
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
@@ -556,54 +542,6 @@ async def find_by_username(context, chat_id, username):
         pass
     return None, None
 
-
-async def resolve_target_direct(context, chat_id, text: str):
-    """
-    يحاول إيجاد المستخدم مباشرةً بأي طريقة ممكنة —
-    يشتغل حتى لو الشخص لم يرسل رسالة قط في المجموعة.
-    يقبل: @username  أو  user_id رقمي
-    """
-    text = text.strip()
-
-    # ══ لو ID رقمي ══
-    if text.lstrip("-").isdigit() and len(text.lstrip("-")) > 4:
-        uid = int(text)
-        # أولاً get_chat (يشتغل دائماً حتى لو مش في المجموعة)
-        try:
-            info = await context.bot.get_chat(uid)
-            name = info.first_name or str(uid)
-            # حاول تسجيل اليوزرنيم لو موجود
-            username = getattr(info, "username", None)
-            update_user(chat_id, uid, username, name)
-            return uid, name
-        except:
-            pass
-        return None, None
-
-    # ══ لو @username ══
-    uname = text.lstrip("@")
-
-    # 1. من قاعدة البيانات أولاً (أسرع)
-    row = db_exec(
-        "SELECT user_id, first_name FROM users WHERE LOWER(username)=?",
-        (uname.lower(),), fetchone=True,
-    )
-    if row:
-        return row[0], row[1]
-
-    # 2. من تيليجرام مباشرة — get_chat(@username) لا يحتاج الشخص في المجموعة
-    try:
-        cu   = await context.bot.get_chat(f"@{uname}")
-        uid  = cu.id
-        name = cu.first_name or uname
-        update_user(chat_id, uid, cu.username, name)
-        return uid, name
-    except Exception as e:
-        logging.warning(f"resolve_target_direct @{uname}: {e}")
-
-    return None, None
-
-
 async def extract_target(context, m):
     cid = str(m.chat.id)
     if m.reply_to_message:
@@ -659,22 +597,11 @@ async def already_punished(context, chat_id, target_id) -> bool:
 async def do_punish(context, chat_id, target_id, rule_key):
     rule = RULES[rule_key]
     if rule["type"] == "restrict":
-        until_ts = safe_until_ts(rule["time"])
+        until_ts = int(time.time()) + rule["time"]
         until    = datetime.fromtimestamp(until_ts)
         await context.bot.restrict_chat_member(
             chat_id, target_id,
-            permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
+            permissions=ChatPermissions(can_send_messages=False),
             until_date=until_ts,
         )
         db_exec(
@@ -918,22 +845,11 @@ async def _scan_media_task(context, msg, chat, user, rank, cid):
         if is_managed:
             await _demote_admin(context, chat.id, uid)
         elif rank == "عضو":
-            until_ts = safe_until_ts(3600)
+            until_ts = int(time.time()) + 3600
             until    = datetime.fromtimestamp(until_ts)
             await context.bot.restrict_chat_member(
                 chat.id, uid,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
+                permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_ts,
             )
             db_exec(
@@ -1044,22 +960,11 @@ async def _report_worker(context, m):
             directed  = await is_directed_at_reporter(context, target, reporter_id)
             is_global = matched in GLOBAL_VIOLATIONS if matched else False
             if not directed and not is_global:
-                until_ts = safe_until_ts(1800)
+                until_ts = int(time.time()) + 1800
                 try:
                     await context.bot.restrict_chat_member(
                         cid, reporter_id,
-                        permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
+                        permissions=ChatPermissions(can_send_messages=False),
                         until_date=until_ts,
                     )
                     db_exec(
@@ -1077,25 +982,25 @@ async def _report_worker(context, m):
                 return
             else:
                 try:
-                            await do_punish(context, str(cid), target.from_user.id, matched)
+                    await do_punish(context, str(cid), target.from_user.id, matched)
                 except TelegramError:
                     pass
         else:
             if not is_reporter_admin:
-                # 1. نحسب الوقت بالثواني أولاً ونخزنه في المتغير
-                until_ts = safe_until_ts(1800)
-                
-                # 2. نستدعي دالة العقاب ونمرر لها الوقت والـ commit بمحاذاة صحيحة
-                                await do_punish(
-                    context, 
-                    str(cid), 
-                    target.from_user.id, 
-                    matched, 
-                    until=datetime.fromtimestamp(until_ts).isoformat(), 
-                    commit=True
-                )
-            except TelegramError:  # أو ضعها except: فقط إذا كنت تريد صيغة عامة
-                pass
+                until_ts = int(time.time()) + 1800
+                try:
+                    await context.bot.restrict_chat_member(
+                        cid, reporter_id,
+                        permissions=ChatPermissions(can_send_messages=False),
+                        until_date=until_ts,
+                    )
+                    db_exec(
+                        "INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                        (str(cid), reporter_id, "restrict",
+                         datetime.fromtimestamp(until_ts).isoformat()), commit=True,
+                    )
+                except:
+                    pass
 
     except Exception as e:
         logging.error(f"_report_worker: {e}")
@@ -1241,23 +1146,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         spam_tracker[cid][uid] = [t for t in spam_tracker[cid][uid] if now - t <= 6]
         spam_tracker[cid][uid].append(now)
         if len(spam_tracker[cid][uid]) >= 4:
-            until_ts = safe_until_ts(14400)
+            until_ts = int(now) + 14400
             until    = datetime.fromtimestamp(until_ts)
             try:
                 await context.bot.restrict_chat_member(
                     cid, uid,
-                    permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
+                    permissions=ChatPermissions(can_send_messages=False),
                     until_date=until_ts,
                 )
                 db_exec(
@@ -1307,23 +1201,12 @@ async def check_flood(context, chat_id, uid, real_chat_id) -> bool:
     user_message_times[key] = [t for t in user_message_times[key] if now - t <= 5]
     user_message_times[key].append(now)
     if len(user_message_times[key]) >= 6:
-        until_ts = safe_until_ts(6 * 3600)
+        until_ts = int(now) + 6 * 3600
         until    = datetime.fromtimestamp(until_ts)
         try:
             await context.bot.restrict_chat_member(
                 real_chat_id, uid,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
+                permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_ts,
             )
             db_exec(
@@ -1416,20 +1299,14 @@ async def _admin_commands(m, rank, text, context):
     if text.startswith("رفع القيود"):
         parts = text.split()
         tid, tname = None, None
-
-        # أولاً: لو في رد على رسالة
-        if m.reply_to_message:
+        if len(parts) > 1:
+            class _F:
+                chat = m.chat; reply_to_message = None
+                text = " ".join(parts[1:])
+            tid, tname = await extract_target(context, _F())
+        if not tid and m.reply_to_message:
             tid   = m.reply_to_message.from_user.id
             tname = m.reply_to_message.from_user.first_name
-
-        # ثانياً: لو كتب @username أو ID في نص الأمر — يشتغل حتى لو ما أرسل رسالة قبلاً
-        if not tid and len(parts) > 1:
-            for part in parts[1:]:
-                if part.startswith("@") or (part.isdigit() and len(part) > 4):
-                    tid, tname = await resolve_target_direct(context, m.chat.id, part)
-                    if tid:
-                        break
-
         if not tid:
             await m.reply_text("⌯ استخدم الرد على المستخدم أو اكتب @username مع الأمر.")
             return
@@ -1620,16 +1497,7 @@ async def _promote(m, rank, context):
     if rank not in ("مطور","مالك اساسي","مالك","مدير"):
         return
     cid = str(m.chat.id)
-    if m.reply_to_message:
-        tid   = m.reply_to_message.from_user.id
-        tname = m.reply_to_message.from_user.first_name
-    else:
-        tid, tname = None, None
-        for part in (m.text or "").split():
-            if part.startswith("@") or (part.lstrip("-").isdigit() and len(part.lstrip("-")) > 4):
-                tid, tname = await resolve_target_direct(context, m.chat.id, part)
-                if tid:
-                    break
+    tid, tname = await extract_target(context, m)
     if not tid:
         await m.reply_text("⌯ لم أجد المستخدم!")
         return
@@ -1654,17 +1522,7 @@ async def _punish(m, rank, context):
     if rank not in ("مطور","مالك اساسي","مالك","مدير"):
         return
     cid = str(m.chat.id)
-    # نستخدم resolve_target_direct — يشتغل حتى لو الشخص ما بعت رسالة قبلاً
-    if m.reply_to_message:
-        tid   = m.reply_to_message.from_user.id
-        tname = m.reply_to_message.from_user.first_name
-    else:
-        tid, tname = None, None
-        for part in (m.text or "").split():
-            if part.startswith("@") or (part.lstrip("-").isdigit() and len(part.lstrip("-")) > 4):
-                tid, tname = await resolve_target_direct(context, m.chat.id, part)
-                if tid:
-                    break
+    tid, tname = await extract_target(context, m)
     if not tid:
         await m.reply_text("⌯ لم أجد المستخدم!")
         return
@@ -1687,7 +1545,7 @@ async def _punish(m, rank, context):
             if parts[i].isdigit() and i + 1 < len(parts):
                 dur_str = f"{parts[i]} {parts[i+1]}"; break
 
-    until_ts = safe_until_ts(secs(dur_str)) if dur_str else None
+    until_ts = (int(time.time()) + secs(dur_str)) if dur_str else None
     until    = datetime.fromtimestamp(until_ts) if until_ts else None
     disp     = tname or f"المستخدم {tid}"
 
@@ -1745,18 +1603,7 @@ async def _punish(m, rank, context):
             kwargs = {"until_date": until_ts} if until_ts else {}
             await context.bot.restrict_chat_member(
                 cid, tid,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_audios=False,
-                    can_send_documents=False,
-                    can_send_photos=False,
-                    can_send_videos=False,
-                    can_send_video_notes=False,
-                    can_send_voice_notes=False,
-                    can_send_polls=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False,
-                ),
+                permissions=ChatPermissions(can_send_messages=False),
                 **kwargs,
             )
             db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
