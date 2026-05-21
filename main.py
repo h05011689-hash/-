@@ -1095,7 +1095,7 @@ async def _report_worker(context, m):
                     commit=True
                 )
 
-)
+
 
 
                 except:
