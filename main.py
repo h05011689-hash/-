@@ -1086,7 +1086,7 @@ async def _report_worker(context, m):
                 until_ts = safe_until_ts(1800)
                 
                 # 2. نستدعي دالة العقاب ونمرر لها الوقت والـ commit بمحاذاة صحيحة
-                await do_punish(
+                                await do_punish(
                     context, 
                     str(cid), 
                     target.from_user.id, 
@@ -1094,12 +1094,8 @@ async def _report_worker(context, m):
                     until=datetime.fromtimestamp(until_ts).isoformat(), 
                     commit=True
                 )
-
-
-
-
-                except:
-                    pass
+            except TelegramError:  # أو ضعها except: فقط إذا كنت تريد صيغة عامة
+                pass
 
     except Exception as e:
         logging.error(f"_report_worker: {e}")
