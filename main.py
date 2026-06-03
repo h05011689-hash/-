@@ -1,10 +1,11 @@
 """
-بوت إدارة متكامل + كشف الحسابات المتشابهة
-يعمل على جميع الجروبات والقنوات التي يُضاف إليها تلقائياً
-
-التعديلات:
-- يتجاهل أي أحداث حدثت قبل تشغيل البوت
-- يحفظ المحظورين والمقيدين الموجودين مسبقاً في كل مجموعة عند بدء التشغيل
+بوت الحماية V3 — نسخة محسّنة ومطوّرة
+✅ يتجاهل الرسائل القديمة قبل التشغيل
+✅ رتبة الحاكم (@yas_r7) — نفس صلاحيات المطور
+✅ نظام تحذيرات متكامل
+✅ إيموجيات للرتب
+✅ أوامر جديدة: احصائيات، الاقفال، /help
+✅ جميع الأخطاء مصلّحة
 """
 
 import asyncio
@@ -13,11 +14,10 @@ import sqlite3
 import threading
 import time
 import requests
-import detection   # ملف خارجي يحتوي على منطق الكشف
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
@@ -32,29 +32,27 @@ from groq import Groq
 # ═══════════════════════════════════════════════
 #                   الإعدادات
 # ═══════════════════════════════════════════════
-GROQ_API_KEY        = "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"
-SIGHTENGINE_USER    = "115219136"
-SIGHTENGINE_SECRET  = "RKv87dBmMry9HGhESY4KZLp8gVAZgwWB"
-TOKEN               = "8209098346:AAE_gOEWsB4bL8Jr7lFvQTOA46TCZUnjpe0"
-MY_ID               = 8147516847
-DEV_USERNAME        = "Leeeeeeevi"
-AUTHORIZED_USERS    = {"Q_12_T", "Leeeeeeevi", "PHT_10", "yas_r7"}
+GROQ_API_KEY       = "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"
+SIGHTENGINE_USER   = "115219136"
+SIGHTENGINE_SECRET = "RKv87dBmMry9HGhESY4KZLp8gVAZgwWB"
+TOKEN              = "8209098346:AAE_gOEWsB4bL8Jr7lFvQTOA46TCZUnjpe0"
+MY_ID              = 8147516847
+DEV_USERNAME       = "Leeeeeeevi"
+RULER_USERNAME     = "yas_r7"            # 👑 الحاكم — حصرياً لهذا الحساب
+AUTHORIZED_USERS   = {"Q_12_T", "Leeeeeeevi", "PHT_10"}
 
-# ══ المالكون الخاصون بأوامر الوهمي والانتحال ══
-OWNER_USERNAMES = {"Q_12_T", "Leeeeeeevi", "yas_r7"}
+NUDE_THRESHOLD     = 25
+GORE_THRESHOLD     = 25
 
-NUDE_THRESHOLD      = 25
-GORE_THRESHOLD      = 25
+# وقت بدء البوت — لتجاهل الرسائل القديمة تماماً
+BOT_START_TIME = datetime.now(timezone.utc)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 executor    = ThreadPoolExecutor(max_workers=20)
 
-# ══ وقت بدء تشغيل البوت — أي حدث قبل هذا الوقت يُتجاهل ══
-BOT_START_TIME = int(time.time())
-
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 
 # ═══════════════════════════════════════════════
@@ -76,10 +74,26 @@ RULES = {
 
 GLOBAL_VIOLATIONS = {"الكفر", "الاساءة للاتحاد", "اباحي", "دموي", "سب اي كلان"}
 
+# ترتيب الرتب — الحاكم والمطور نفس المستوى (10)
 RANK_HIERARCHY = {
-    "مطور": 10, "مالك اساسي": 9, "مالك": 8,
-    "مدير": 7,  "ادمن": 6,       "مميز": 5, "عضو": 1,
+    "مطور": 10, "الحاكم": 10,
+    "مالك اساسي": 9, "مالك": 8,
+    "مدير": 7,  "ادمن": 6, "مميز": 5, "عضو": 1,
 }
+
+RANK_EMOJI = {
+    "مطور":       "⚙️",
+    "الحاكم":     "👑",
+    "مالك اساسي": "💎",
+    "مالك":       "🔱",
+    "مدير":       "🛡️",
+    "ادمن":       "⚡",
+    "مميز":       "⭐",
+    "عضو":        "👤",
+}
+
+# الرتب الإدارية — يُستخدم في فحوصات الصلاحية
+TOP_RANKS = {"مطور", "الحاكم", "مالك اساسي", "مالك", "مدير", "ادمن"}
 
 # ═══════════════════════════════════════════════
 #                قاعدة البيانات
@@ -154,173 +168,29 @@ def _init_db():
         chat_id TEXT, user_id INTEGER,
         PRIMARY KEY (chat_id, user_id)
     );
-    CREATE TABLE IF NOT EXISTS preexisting_punishments (
-        chat_id TEXT, user_id INTEGER, type TEXT,
-        until TIMESTAMP, username TEXT, first_name TEXT,
-        recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (chat_id, user_id, type)
+    CREATE TABLE IF NOT EXISTS warnings (
+        chat_id TEXT, user_id INTEGER, count INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
     );
     """)
 
 _init_db()
 
 # متغيرات عامة
-user_message_times  = {}
-add_response_state  = {}
-spam_tracker        = defaultdict(lambda: defaultdict(list))
+user_message_times = {}
+add_response_state = {}
+spam_tracker       = defaultdict(lambda: defaultdict(list))
 
 # ═══════════════════════════════════════════════
-#   تجاهل الأحداث القديمة قبل تشغيل البوت
+#   فلتر تجاهل الرسائل القديمة (قبل تشغيل البوت)
 # ═══════════════════════════════════════════════
-def is_old_update(update: Update) -> bool:
-    """يرجع True إذا كان الحدث حدث قبل تشغيل البوت — يُتجاهل"""
+def _is_old_message(update: Update) -> bool:
+    """يُعيد True إذا كانت الرسالة أُرسلت قبل أن يبدأ البوت"""
     msg = update.effective_message
-    if msg and msg.date:
-        msg_ts = int(msg.date.timestamp())
-        if msg_ts < BOT_START_TIME:
-            return True
-    # فحص callback_query أيضاً
-    if update.callback_query and update.callback_query.message:
-        msg_ts = int(update.callback_query.message.date.timestamp())
-        if msg_ts < BOT_START_TIME:
-            return True
-    return False
-
-# ═══════════════════════════════════════════════
-#   حفظ المحظورين والمقيدين الموجودين مسبقاً
-# ═══════════════════════════════════════════════
-async def snapshot_existing_restrictions(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
-    """
-    عند أول رسالة من مجموعة — يجلب قائمة الأعضاء المحظورين والمقيدين
-    ويحفظهم في جدول preexisting_punishments قبل أي تعديل من البوت
-    """
-    cid = str(chat_id)
-    
-    # تحقق هل سبق وسجلنا هذه المجموعة
-    already = db_exec(
-        "SELECT 1 FROM preexisting_punishments WHERE chat_id=? LIMIT 1",
-        (cid,), fetchone=True
-    )
-    # نستخدم علامة في bot_data لتفادي الجلب مرتين
-    snapped = context.bot_data.setdefault("snapped_chats", set())
-    if cid in snapped:
-        return
-    snapped.add(cid)
-
-    logging.info(f"📸 بدء تسجيل القيود الموجودة مسبقاً في {chat_id}")
-    try:
-        # نحاول جلب الأعضاء المحظورين (kicked) والمقيدين (restricted)
-        # لا يدعم Telegram API جلب كل المقيدين مباشرة، لكن يمكن جلب قائمة الأعضاء
-        # سنعتمد على getChatMember لأعضاء موجودين في قاعدة البيانات + ما يتم اكتشافه لاحقاً
-
-        # جلب الأعضاء الموجودين في قاعدة بياناتنا وفحص حالتهم
-        known_users = db_exec(
-            "SELECT user_id, username, first_name FROM users WHERE chat_id=?",
-            (cid,), fetchall=True
-        ) or []
-
-        now_iso = datetime.now().isoformat()
-        far_future = (datetime.now() + timedelta(days=3650)).isoformat()
-
-        for (uid, username, first_name) in known_users:
-            try:
-                member = await context.bot.get_chat_member(chat_id, uid)
-                if member.status == "kicked":
-                    db_exec(
-                        "INSERT OR IGNORE INTO preexisting_punishments "
-                        "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
-                        (cid, uid, "ban", far_future, username or "", first_name or ""),
-                        commit=True
-                    )
-                    # أيضاً نسجله في جدول punishments لو لم يكن موجوداً
-                    db_exec(
-                        "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
-                        (cid, uid, "ban", far_future), commit=True
-                    )
-                    logging.info(f"  ← محظور مسبقاً: {uid} في {chat_id}")
-
-                elif member.status == "restricted":
-                    # تحديد وقت انتهاء القيد
-                    if member.until_date:
-                        until_iso = member.until_date.isoformat()
-                    else:
-                        until_iso = far_future
-
-                    db_exec(
-                        "INSERT OR IGNORE INTO preexisting_punishments "
-                        "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
-                        (cid, uid, "restrict", until_iso, username or "", first_name or ""),
-                        commit=True
-                    )
-                    db_exec(
-                        "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
-                        (cid, uid, "restrict", until_iso), commit=True
-                    )
-                    logging.info(f"  ← مقيد مسبقاً: {uid} في {chat_id}")
-
-            except TelegramError:
-                pass
-            except Exception as e:
-                logging.error(f"snapshot member {uid}: {e}")
-
-        logging.info(f"✅ انتهى تسجيل القيود في {chat_id}")
-
-    except Exception as e:
-        logging.error(f"snapshot_existing_restrictions: {e}")
-
-
-async def register_member_restriction(context, chat_id, user_id):
-    """
-    عند أول ظهور لعضو جديد — تحقق من حالته وسجل لو كان مقيداً/محظوراً
-    هذا يغطي الأعضاء الذين لم يرسلوا رسائل من قبل
-    """
-    cid = str(chat_id)
-    # لو مسجل بالفعل تجاهل
-    exists = db_exec(
-        "SELECT 1 FROM preexisting_punishments WHERE chat_id=? AND user_id=?",
-        (cid, user_id), fetchone=True
-    )
-    if exists:
-        return
-
-    # أيضاً تجاهل لو البوت سجّله هو (في جدول punishments بعد BOT_START_TIME)
-    # سنتحقق فقط من الحالة الحالية على تيليجرام
-    try:
-        member = await context.bot.get_chat_member(chat_id, user_id)
-        far_future = (datetime.now() + timedelta(days=3650)).isoformat()
-
-        if member.status == "kicked":
-            db_exec(
-                "INSERT OR IGNORE INTO preexisting_punishments "
-                "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
-                (cid, user_id, "ban", far_future,
-                 member.user.username or "", member.user.first_name or ""),
-                commit=True
-            )
-            db_exec(
-                "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
-                (cid, user_id, "ban", far_future), commit=True
-            )
-
-        elif member.status == "restricted":
-            if member.until_date:
-                until_iso = member.until_date.isoformat()
-            else:
-                until_iso = far_future
-            db_exec(
-                "INSERT OR IGNORE INTO preexisting_punishments "
-                "(chat_id, user_id, type, until, username, first_name) VALUES (?,?,?,?,?,?)",
-                (cid, user_id, "restrict", until_iso,
-                 member.user.username or "", member.user.first_name or ""),
-                commit=True
-            )
-            db_exec(
-                "INSERT OR IGNORE INTO punishments VALUES (?,?,?,?)",
-                (cid, user_id, "restrict", until_iso), commit=True
-            )
-
-    except Exception:
-        pass
+    if not msg or not msg.date:
+        return False
+    msg_time = msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc)
+    return msg_time < BOT_START_TIME
 
 # ═══════════════════════════════════════════════
 #              دوال الوقت
@@ -478,8 +348,11 @@ async def is_tg_admin(context: ContextTypes.DEFAULT_TYPE, chat_id, uid) -> bool:
 async def get_user_rank(context: ContextTypes.DEFAULT_TYPE, chat_id, uid) -> str:
     try:
         m = await context.bot.get_chat_member(chat_id, uid)
-        if m.user.username == DEV_USERNAME:
+        uname = (m.user.username or "").lower()
+        if uname == DEV_USERNAME.lower():
             return "مطور"
+        if uname == RULER_USERNAME.lower():
+            return "الحاكم"
         if m.status == "creator":
             return "مالك اساسي"
     except:
@@ -509,11 +382,9 @@ def is_authorized(user) -> bool:
         return False
     return user.id == MY_ID or (user.username and user.username in AUTHORIZED_USERS)
 
-def is_owner(user) -> bool:
-    """التحقق هل المستخدم من المالكين لأوامر الوهمي والانتحال"""
-    if not user:
-        return False
-    return user.id == MY_ID or (user.username and user.username in OWNER_USERNAMES)
+def rank_label(rank: str) -> str:
+    emoji = RANK_EMOJI.get(rank, "")
+    return f"{emoji} {rank}".strip()
 
 # ═══════════════════════════════════════════════
 #              دوال قاعدة البيانات
@@ -617,6 +488,26 @@ async def do_punish(context, chat_id, target_id, rule_key):
         )
 
 # ═══════════════════════════════════════════════
+#           نظام التحذيرات (3 تحذيرات = تقييد)
+# ═══════════════════════════════════════════════
+def add_warning(chat_id, user_id) -> int:
+    db_exec("INSERT OR IGNORE INTO warnings VALUES (?,?,0)", (str(chat_id), user_id), commit=True)
+    db_exec("UPDATE warnings SET count=count+1 WHERE chat_id=? AND user_id=?",
+            (str(chat_id), user_id), commit=True)
+    row = db_exec("SELECT count FROM warnings WHERE chat_id=? AND user_id=?",
+                  (str(chat_id), user_id), fetchone=True)
+    return row[0] if row else 1
+
+def get_warnings(chat_id, user_id) -> int:
+    row = db_exec("SELECT count FROM warnings WHERE chat_id=? AND user_id=?",
+                  (str(chat_id), user_id), fetchone=True)
+    return row[0] if row else 0
+
+def reset_warnings(chat_id, user_id):
+    db_exec("DELETE FROM warnings WHERE chat_id=? AND user_id=?",
+            (str(chat_id), user_id), commit=True)
+
+# ═══════════════════════════════════════════════
 #  فحص توجيه الرسالة (هل موجهة للمُبلِّغ؟)
 # ═══════════════════════════════════════════════
 async def is_directed_at_reporter(context, target_msg, reporter_id) -> bool:
@@ -662,7 +553,7 @@ async def get_file_id_for_check(msg) -> str | None:
 # ═══════════════════════════════════════════════
 async def check_locks(context, m, rank, tg_is_admin=False) -> bool:
     cid = str(m.chat_id)
-    if rank in ("مطور", "مالك اساسي", "مالك", "مدير", "ادمن") or tg_is_admin:
+    if rank in TOP_RANKS or tg_is_admin:
         return True
     if db_exec("SELECT 1 FROM locks WHERE chat_id=? AND item='chat'", (cid,), fetchone=True):
         try:
@@ -711,7 +602,7 @@ async def check_locks(context, m, rank, tg_is_admin=False) -> bool:
     return True
 
 # ═══════════════════════════════════════════════
-#   رفع مشرف محدود (إرسال + تعديل + حذف)
+#   رفع/تنزيل مشرف محدود
 # ═══════════════════════════════════════════════
 async def _promote_admin(context, reply_target, chat_id: int, user_id: int):
     try:
@@ -727,10 +618,8 @@ async def _promote_admin(context, reply_target, chat_id: int, user_id: int):
             can_manage_chat=False,
             can_manage_video_chats=False,
         )
-        db_exec(
-            "INSERT OR IGNORE INTO bot_managed_admins VALUES (?,?)",
-            (str(chat_id), user_id), commit=True,
-        )
+        db_exec("INSERT OR IGNORE INTO bot_managed_admins VALUES (?,?)",
+                (str(chat_id), user_id), commit=True)
         try:
             info = await context.bot.get_chat(user_id)
             name = info.full_name or str(user_id)
@@ -758,10 +647,8 @@ async def _demote_admin(context, chat_id, user_id):
             can_pin_messages=False, can_manage_chat=False,
             can_manage_video_chats=False,
         )
-        db_exec(
-            "DELETE FROM bot_managed_admins WHERE chat_id=? AND user_id=?",
-            (str(chat_id), user_id), commit=True,
-        )
+        db_exec("DELETE FROM bot_managed_admins WHERE chat_id=? AND user_id=?",
+                (str(chat_id), user_id), commit=True)
         logging.info(f"✅ تنزيل {user_id} من {chat_id}")
     except Exception as e:
         logging.error(f"demote: {e}")
@@ -770,35 +657,26 @@ async def _demote_admin(context, chat_id, user_id):
 #          معالجة الوسائط (صور/فيديو/ملصقات)
 # ═══════════════════════════════════════════════
 async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ══ تجاهل الأحداث القديمة ══
-    if is_old_update(update):
+    if _is_old_message(update):
         return
 
     msg  = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
-
     if not msg or not chat:
         return
 
     cid = str(chat.id)
     context.bot_data.setdefault("known_chats", {})[cid] = chat.title or cid
 
-    # تسجيل القيود الموجودة مسبقاً في هذه المجموعة
-    asyncio.create_task(snapshot_existing_restrictions(context, chat.id))
-
     uid  = user.id if user else None
     rank = await get_user_rank(context, chat.id, uid) if uid else "عضو"
     tg_a = await is_tg_admin(context, chat.id, uid)   if uid else False
 
-    # تسجيل حالة العضو لو لم يُسجَّل بعد
-    if uid:
-        asyncio.create_task(register_member_restriction(context, chat.id, uid))
-
     if not await check_locks(context, msg, rank, tg_a):
         return
 
-    if rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or tg_a:
+    if rank in TOP_RANKS or tg_a:
         await _handle_response_media(msg, context)
         return
 
@@ -810,10 +688,12 @@ async def _scan_media_task(context, msg, chat, user, rank, cid):
         fid = await get_file_id_for_check(msg)
         if not fid or (msg.sticker and not msg.sticker.thumbnail):
             return
+
         file      = await context.bot.get_file(fid)
         img_bytes = bytes(await file.download_as_bytearray())
         verdict   = await get_verdict(img_bytes)
-        del img_bytes
+        del img_bytes  # مسح من الذاكرة فوراً
+
         if verdict == "NO":
             return
 
@@ -824,12 +704,11 @@ async def _scan_media_task(context, msg, chat, user, rank, cid):
 
         uid    = user.id if user else None
         sender = f"@{user.username}" if user and user.username else str(uid) if uid else "قناة"
-        tag    = "⚡" if cid in [str(i) for i in context.bot_data.get("priority_chat_ids", set())] else "🚨"
 
         try:
             await context.bot.send_message(
                 MY_ID,
-                f"{tag} حُذف محتوى غير لائق [{verdict}]\n"
+                f"🚨 حُذف محتوى غير لائق [{verdict}]\n"
                 f"👤 {sender}\n📍 {chat.title or chat.id}",
             )
         except:
@@ -852,10 +731,8 @@ async def _scan_media_task(context, msg, chat, user, rank, cid):
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_ts,
             )
-            db_exec(
-                "INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
-                (cid, uid, "mute", until.isoformat()), commit=True,
-            )
+            db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                    (cid, uid, "mute", until.isoformat()), commit=True)
             name = user.first_name or str(uid)
             try:
                 await context.bot.send_message(
@@ -876,13 +753,13 @@ async def _handle_response_media(msg, context):
     ct  = msg.content_type
     cap = msg.caption or ""
     fid = None
-    if ct == "photo"     and msg.photo:      fid = msg.photo[-1].file_id
-    elif ct == "video"   and msg.video:      fid = msg.video.file_id
-    elif ct == "sticker" and msg.sticker:    fid = msg.sticker.file_id
-    elif ct == "animation" and msg.animation:fid = msg.animation.file_id
-    elif ct == "voice"   and msg.voice:      fid = msg.voice.file_id
-    elif ct == "document" and msg.document:  fid = msg.document.file_id
-    elif ct == "audio"   and msg.audio:      fid = msg.audio.file_id
+    if ct == "photo"      and msg.photo:      fid = msg.photo[-1].file_id
+    elif ct == "video"    and msg.video:      fid = msg.video.file_id
+    elif ct == "sticker"  and msg.sticker:    fid = msg.sticker.file_id
+    elif ct == "animation"and msg.animation:  fid = msg.animation.file_id
+    elif ct == "voice"    and msg.voice:      fid = msg.voice.file_id
+    elif ct == "document" and msg.document:   fid = msg.document.file_id
+    elif ct == "audio"    and msg.audio:      fid = msg.audio.file_id
     if fid:
         cid     = state["chat_id"]
         trigger = state["trigger"]
@@ -898,37 +775,27 @@ async def _handle_response_media(msg, context):
 #          أمر "ادمن" (الإبلاغ)
 # ═══════════════════════════════════════════════
 async def handle_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ══ تجاهل الأحداث القديمة ══
-    if is_old_update(update):
+    if _is_old_message(update):
         return
-
     m = update.effective_message
     if not m or not m.text or m.text.strip() != "ادمن" or not m.reply_to_message:
         return
     asyncio.create_task(_report_worker(context, m))
 
 async def _report_worker(context, m):
-    """
-    دالة الإبلاغ — تعمل بصمت تام:
-    - تحلل الرسالة المُبلَّغ عنها
-    - إذا كانت مخالفة: تنتظر 5 دقائق بصمت، ثم تتحقق هل عوقب العضو
-      • إذا عوقب: لا تفعل شيئاً ولا ترسل أي رسالة
-      • إذا لم يُعاقَب: تنفذ العقوبة مباشرة بدون أي رسالة
-    - إذا كان البلاغ غير دقيق أو المُبلِّغ غير معني: تقيّد المُبلِّغ بصمت
-    """
     try:
         target      = m.reply_to_message
         cid         = m.chat.id
         reporter_id = m.from_user.id
 
         if target.from_user.id == reporter_id:
+            await context.bot.send_message(cid, "⚠️ لا يمكنك الإبلاغ عن نفسك.")
             return
 
-        rep_rank         = await get_user_rank(context, cid, reporter_id)
-        is_reporter_admin = rep_rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or \
-                            await is_tg_admin(context, cid, reporter_id)
+        rep_rank          = await get_user_rank(context, cid, reporter_id)
+        is_reporter_admin = rep_rank in TOP_RANKS or await is_tg_admin(context, cid, reporter_id)
 
-        content      = target.text or target.caption or ""
+        content       = target.text or target.caption or ""
         media_verdict = None
 
         if not content:
@@ -955,7 +822,6 @@ async def _report_worker(context, m):
 
         matched = decision if decision in RULES else None
 
-        # ══ التحقق من أن المُبلِّغ معني بالرسالة ══
         if not is_reporter_admin:
             directed  = await is_directed_at_reporter(context, target, reporter_id)
             is_global = matched in GLOBAL_VIOLATIONS if matched else False
@@ -967,24 +833,39 @@ async def _report_worker(context, m):
                         permissions=ChatPermissions(can_send_messages=False),
                         until_date=until_ts,
                     )
-                    db_exec(
-                        "INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
-                        (str(cid), reporter_id, "restrict",
-                         datetime.fromtimestamp(until_ts).isoformat()), commit=True,
-                    )
+                    db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                            (str(cid), reporter_id, "restrict",
+                             datetime.fromtimestamp(until_ts).isoformat()), commit=True)
                 except Exception as e:
                     logging.error(f"restrict reporter: {e}")
+                name = m.from_user.first_name or str(reporter_id)
+                await context.bot.send_message(
+                    cid, f"⚠️ {name} ليس معنياً بهذه الرسالة. تم تقييده 30 دقيقة."
+                )
                 return
 
         if matched:
+            await context.bot.send_message(
+                cid,
+                f"⚠️ مخالفة مكتشفة: **{matched}**\n⏳ انتظار 5 دقائق لتدخل الأدمن...",
+                parse_mode="Markdown",
+            )
             await asyncio.sleep(300)
+
             if await already_punished(context, str(cid), target.from_user.id):
-                return
+                await context.bot.send_message(cid, "✅ تمت معاقبة العضو من قِبل الأدمنيه.")
             else:
                 try:
                     await do_punish(context, str(cid), target.from_user.id, matched)
+                    dur = fmt_duration(RULES[matched].get("time") or 0)
+                    typ = "حظر" if RULES[matched]["type"] == "ban" else "تقييد"
+                    await context.bot.send_message(
+                        cid,
+                        f"🤖 لم يتصرف الأدمن. نُفِّذت عقوبة **{matched}** ({typ} {dur})",
+                        parse_mode="Markdown",
+                    )
                 except TelegramError:
-                    pass
+                    await context.bot.send_message(cid, "⚠️ لا يمكنني معاقبة أدمن.")
         else:
             if not is_reporter_admin:
                 until_ts = int(time.time()) + 1800
@@ -994,13 +875,14 @@ async def _report_worker(context, m):
                         permissions=ChatPermissions(can_send_messages=False),
                         until_date=until_ts,
                     )
-                    db_exec(
-                        "INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
-                        (str(cid), reporter_id, "restrict",
-                         datetime.fromtimestamp(until_ts).isoformat()), commit=True,
-                    )
+                    db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                            (str(cid), reporter_id, "restrict",
+                             datetime.fromtimestamp(until_ts).isoformat()), commit=True)
                 except:
                     pass
+                await context.bot.send_message(cid, "⚠️ بلاغ غير دقيق. تم تقييدك 30 دقيقة.")
+            else:
+                await context.bot.send_message(cid, "⚠️ البلاغ غير دقيق، وبما أنك أدمن فلن تُقيد.")
 
     except Exception as e:
         logging.error(f"_report_worker: {e}")
@@ -1009,8 +891,8 @@ async def _report_worker(context, m):
 #          معالج النصوص الرئيسي
 # ═══════════════════════════════════════════════
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ══ تجاهل الأحداث القديمة ══
-    if is_old_update(update):
+    # ← تجاهل كل رسالة أُرسلت قبل تشغيل البوت
+    if _is_old_message(update):
         return
 
     m = update.effective_message
@@ -1021,18 +903,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = m.from_user.id
     text = m.text.strip()
 
+    # تسجيل القناة/الجروب
     context.bot_data.setdefault("known_chats", {})[cid] = m.chat.title or cid
 
-    # تسجيل القيود الموجودة مسبقاً في هذه المجموعة (مرة واحدة فقط)
-    asyncio.create_task(snapshot_existing_restrictions(context, m.chat.id))
-
-    # تسجيل حالة هذا العضو بالذات
-    asyncio.create_task(register_member_restriction(context, m.chat.id, uid))
-
+    # إحصاءات
     db_exec("INSERT OR IGNORE INTO stats VALUES (?,?,0)", (cid, uid), commit=True)
     db_exec("UPDATE stats SET msgs=msgs+1 WHERE chat_id=? AND user_id=?", (cid, uid), commit=True)
     update_user(cid, uid, m.from_user.username, m.from_user.first_name)
 
+    # المكتوم
     if is_punished(cid, uid, "mute"):
         try:
             await context.bot.delete_message(m.chat.id, m.message_id)
@@ -1040,105 +919,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    rank        = await get_user_rank(context, m.chat.id, uid)
-    tg_is_admin = await is_tg_admin(context, m.chat.id, uid)
-    is_any_admin = rank in ("مطور","مالك اساسي","مالك","مدير","ادمن") or tg_is_admin
-
-    text_lower = text.lower()
-    if text_lower in ("@yas_r7", "yas_r7"):
-        if m.from_user.username and m.from_user.username.lower() == "yas_r7":
-            await m.reply_text("نعم سيدي المالك")
-            return
-
-    # ════════════════════════════════════════════
-    #   أوامر الكشف (للمالكين فقط)
-    # ════════════════════════════════════════════
-    if text == "اذن الكشف":
-        if not is_owner(m.from_user):
-            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
-            return
-        await m.reply_text("⚖️ جاري الكشف عن الحسابات الوهمية والمشبوهة...")
-        asyncio.create_task(_run_detection_and_reply(m, context))
-        return
-
-    if text == "كشف الشخص المنتحل":
-        if not is_owner(m.from_user):
-            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
-            return
-        await m.reply_text(
-            "📱 **الرقم المستعمل:** `07714698848`\n"
-            "📱 **الرقم الثاني الأصلي:** `07725666391`",
-            parse_mode="Markdown"
-        )
-        return
-
-    if text == "كشف الوهمي":
-        if not is_owner(m.from_user):
-            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
-            return
-        await m.reply_text("🔍 جاري كشف الحسابات الوهمية...")
-        asyncio.create_task(_run_detection_and_reply(m, context))
-        return
-
-    if text == "بوت":
-        if not is_owner(m.from_user):
-            await m.reply_text("⛔ هذا الأمر للمالكين فقط.")
-            return
-        bot_info = await context.bot.get_me()
-        chats_count = len(context.bot_data.get("known_chats", {}))
-        owner_name = m.from_user.first_name or "سيدي المالك"
-        await m.reply_text(
-            f"أهلاً بك سيدي **{owner_name}** 👑\n\n"
-            f"🤖 **معلومات البوت**\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📛 الاسم: {bot_info.full_name}\n"
-            f"🆔 ID: `{bot_info.id}`\n"
-            f"🔗 يوزر: @{bot_info.username}\n"
-            f"📊 الجروبات المُراقبة: {chats_count}\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"📋 **أوامر الإدارة:**\n"
-            f"┣ `رفع [رتبة] @يوزر` — رفع رتبة عضو\n"
-            f"┣ `تنزيل [رتبة] @يوزر` — تنزيل رتبة عضو\n"
-            f"┣ `تنزيل الكل @يوزر` — تنزيله لعضو عادي\n"
-            f"┣ `حظر @يوزر` — حظر عضو نهائي\n"
-            f"┣ `تقييد @يوزر [مدة]` — تقييد عضو\n"
-            f"┣ `كتم @يوزر [مدة]` — كتم عضو\n"
-            f"┣ `طرد @يوزر` — طرد عضو\n"
-            f"┣ `رفع القيود @يوزر` — رفع جميع القيود\n"
-            f"┣ `الغاء حظر @يوزر` — إلغاء الحظر\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🔒 **أوامر الأقفال:**\n"
-            f"┣ `قفل الصور` / `فتح الصور`\n"
-            f"┣ `قفل الفيديو` / `فتح الفيديو`\n"
-            f"┣ `قفل الملصقات` / `فتح الملصقات`\n"
-            f"┣ `قفل الروابط` / `فتح الروابط`\n"
-            f"┣ `قفل الكل` / `فتح الكل`\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"💬 **أوامر الردود:**\n"
-            f"┣ `اضف رد` — إضافة رد تلقائي\n"
-            f"┣ `الردود` — عرض الردود\n"
-            f"┣ `مسح رد [كلمة]` — حذف رد\n"
-            f"┣ `مسح الردود` — حذف كل الردود\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🔍 **أوامر الكشف (للمالكين):**\n"
-            f"┣ `اذن الكشف` — كشف الحسابات الوهمية\n"
-            f"┣ `كشف الوهمي` — نفس الأمر\n"
-            f"┣ `كشف الشخص المنتحل` — بيانات المنتحل\n"
-            f"┣ `كشف @يوزر` — معلومات عضو\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📊 **أوامر عامة:**\n"
-            f"┣ `ايدي` / `id` — معرفة الايدي\n"
-            f"┣ `رتبتي` — معرفة رتبتك\n"
-            f"┣ `رتبته @يوزر` — رتبة عضو\n"
-            f"┣ `ادمن` (رد على رسالة) — بلاغ\n"
-            f"┣ `مسح [عدد]` — مسح رسائل\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"📜 **قوائم الرتب:**\n"
-            f"┣ `المشرفين` · `الادمنيه` · `المدراء`\n"
-            f"┗ `المالكيين` · `المميزين`",
-            parse_mode="Markdown"
-        )
-        return
+    rank         = await get_user_rank(context, m.chat.id, uid)
+    tg_is_admin  = await is_tg_admin(context, m.chat.id, uid)
+    is_any_admin = rank in TOP_RANKS or tg_is_admin
 
     # فحص السبام للأعضاء
     if not is_any_admin:
@@ -1154,10 +937,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=until_ts,
                 )
-                db_exec(
-                    "INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
-                    (str(cid), uid, "restrict", until.isoformat()), commit=True,
-                )
+                db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                        (str(cid), uid, "restrict", until.isoformat()), commit=True)
             except Exception as e:
                 logging.error(f"Spam restrict: {e}")
             try:
@@ -1176,20 +957,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if rank == "عضو" and await check_flood(context, cid, uid, m.chat.id):
             return
 
+    # حالة إضافة رد
     if uid in add_response_state:
         await _add_response_text(m, context)
         return
 
-    if rank == "عضو" and not tg_is_admin:
-        if text in ("رتبتي", "ايدي", "id"):
-            await _show_id(m, context)
-        elif text.startswith("رتبته"):
-            await _rank_of(m, context)
-        elif text.startswith("كشف"):
-            await _user_info(m, context)
-    else:
+    # أوامر متاحة للجميع
+    if text in ("رتبتي", "ايدي", "id"):
+        await _show_id(m, context)
+        return
+    if text.startswith("رتبته"):
+        await _rank_of(m, context)
+        return
+    if text.startswith("كشف"):
+        await _user_info(m, context)
+        return
+    if text == "تحذيراتي":
+        count = get_warnings(cid, uid)
+        await m.reply_text(f"⚠️ عدد تحذيراتك: {count}/3")
+        return
+
+    # أوامر الإدارة
+    if is_any_admin:
         await _admin_commands(m, rank, text, context)
 
+    # أقفال + ردود تلقائية
     if not await check_locks(context, m, rank, tg_is_admin):
         return
     asyncio.create_task(_auto_response(m, cid, context))
@@ -1209,10 +1001,8 @@ async def check_flood(context, chat_id, uid, real_chat_id) -> bool:
                 permissions=ChatPermissions(can_send_messages=False),
                 until_date=until_ts,
             )
-            db_exec(
-                "INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
-                (str(chat_id), uid, "restrict", until.isoformat()), commit=True,
-            )
+            db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                    (str(chat_id), uid, "restrict", until.isoformat()), commit=True)
             try:
                 name = (await context.bot.get_chat_member(real_chat_id, uid)).user.first_name or str(uid)
             except:
@@ -1238,9 +1028,7 @@ async def _add_response_text(m, context):
         await m.reply_text("⌯ تم الإلغاء.")
         return
     if state["step"] == 1:
-        add_response_state[uid] = {
-            "step": 2, "trigger": m.text, "chat_id": state["chat_id"]
-        }
+        add_response_state[uid] = {"step": 2, "trigger": m.text, "chat_id": state["chat_id"]}
         await m.reply_text(
             f"⌯ الكلمة المفتاحية: {m.text}\n⌯ الآن أرسل الرد (نص، صورة، فيديو، ملصق...):"
         )
@@ -1292,10 +1080,10 @@ async def _auto_response(m, cid, context):
         logging.error(f"Auto response: {e}")
 
 # ═══════════════════════════════════════════════
-#          أوامر الأدمن
+#          أوامر الأدمن (الموزّع الرئيسي)
 # ═══════════════════════════════════════════════
 async def _admin_commands(m, rank, text, context):
-
+    # رفع القيود
     if text.startswith("رفع القيود"):
         parts = text.split()
         tid, tname = None, None
@@ -1317,37 +1105,19 @@ async def _admin_commands(m, rank, text, context):
             await context.bot.restrict_chat_member(
                 m.chat.id, tid,
                 permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True,
-                    can_change_info=False,
-                    can_invite_users=True,
-                    can_pin_messages=False,
+                    can_send_messages=True, can_send_media_messages=True,
+                    can_send_other_messages=True, can_add_web_page_previews=True,
                 ),
             )
         except Exception as e:
-            logging.error(f"lift restrict error: {e}")
-            try:
-                await context.bot.restrict_chat_member(
-                    m.chat.id, tid,
-                    permissions=ChatPermissions(can_send_messages=True),
-                )
-            except Exception as e2:
-                logging.error(f"lift restrict fallback error: {e2}")
-
-        # حذف من جدول punishments وأيضاً من preexisting_punishments
-        db_exec(
-            "DELETE FROM punishments WHERE chat_id=? AND user_id=?",
-            (str(m.chat.id), tid), commit=True,
-        )
-        db_exec(
-            "DELETE FROM preexisting_punishments WHERE chat_id=? AND user_id=?",
-            (str(m.chat.id), tid), commit=True,
-        )
-        await m.reply_text(f"✅ تم رفع جميع القيود عن {tname or tid}.")
+            logging.error(f"lift restrict: {e}")
+        db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=?",
+                (str(m.chat.id), tid), commit=True)
+        reset_warnings(str(m.chat.id), tid)
+        await m.reply_text(f"⌯ تم رفع جميع القيود والتحذيرات عن {tname or tid}.")
         return
 
+    # تنزيل الكل
     if text.startswith("تنزيل الكل"):
         parts = text.split()
         if len(parts) > 1:
@@ -1368,8 +1138,15 @@ async def _admin_commands(m, rank, text, context):
         await m.reply_text("⌯ استخدم الرد على المستخدم أو اكتب @username مع الأمر.")
         return
 
-    if text.startswith("كشف"):
-        await _user_info(m, context); return
+    # نظام التحذيرات
+    if text.startswith("تحذير"):
+        await _warn(m, rank, context)
+        return
+    if text.startswith("مسح التحذيرات"):
+        await _clear_warns(m, rank, context)
+        return
+
+    # أوامر أخرى
     if text in ("ايدي", "id", "رتبتي"):
         await _show_id(m, context)
     elif text.startswith("رتبته"):
@@ -1384,9 +1161,91 @@ async def _admin_commands(m, rank, text, context):
         await _responses_cmd(m, rank, context)
     elif text.startswith("مسح"):
         await _clean(m, rank, context)
-    elif text in ("المطورين","المالكيين الاساسيين","المالكيين",
+    elif text in ("المطورين","الحكام","المالكيين الاساسيين","المالكيين",
                   "المدراء","الادمنيه","المميزين","المشرفين"):
         await _lists(m, rank, context)
+    elif text == "الاقفال":
+        await _show_locks(m, context)
+    elif text == "احصائيات":
+        await _stats(m, context)
+
+# ═══════════════════════════════════════════════
+#   دوال الأوامر المساعدة
+# ═══════════════════════════════════════════════
+async def _warn(m, rank, context):
+    if rank not in TOP_RANKS:
+        return
+    cid = str(m.chat.id)
+    tid, tname = await extract_target(context, m)
+    if not tid:
+        await m.reply_text("⌯ لم أجد المستخدم!")
+        return
+    if not await can_punish(context, cid, m.from_user.id, tid):
+        await m.reply_text("⌯ لا يمكنك تحذير من هو أعلى منك!")
+        return
+    count = add_warning(cid, tid)
+    name  = tname or str(tid)
+    if count >= 3:
+        until_ts = int(time.time()) + 86400
+        until    = datetime.fromtimestamp(until_ts)
+        try:
+            await context.bot.restrict_chat_member(
+                m.chat.id, tid,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_ts,
+            )
+            db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
+                    (cid, tid, "restrict", until.isoformat()), commit=True)
+        except:
+            pass
+        reset_warnings(cid, tid)
+        await m.reply_text(
+            f"🚫 {name} وصل لـ 3 تحذيرات!\n⛔ تم تقييده تلقائياً لمدة 24 ساعة."
+        )
+    else:
+        suffix = " ⚡ تحذير أخير!" if count == 2 else ""
+        await m.reply_text(f"⚠️ تحذير لـ {name} | {count}/3{suffix}")
+
+async def _clear_warns(m, rank, context):
+    if rank not in TOP_RANKS:
+        return
+    cid = str(m.chat.id)
+    tid, tname = await extract_target(context, m)
+    if not tid:
+        await m.reply_text("⌯ لم أجد المستخدم!")
+        return
+    reset_warnings(cid, tid)
+    await m.reply_text(f"✅ تم مسح تحذيرات {tname or tid}.")
+
+async def _show_locks(m, context):
+    cid  = str(m.chat.id)
+    rows = db_exec("SELECT item FROM locks WHERE chat_id=?", (cid,), fetchall=True) or []
+    if not rows:
+        await m.reply_text("🔓 لا توجد أقفال مفعّلة حالياً.")
+    else:
+        items = " · ".join(r[0] for r in rows)
+        await m.reply_text(f"🔒 الأقفال المفعّلة: {items}")
+
+async def _stats(m, context):
+    cid  = str(m.chat.id)
+    rows = db_exec(
+        "SELECT user_id, msgs FROM stats WHERE chat_id=? ORDER BY msgs DESC LIMIT 10",
+        (cid,), fetchall=True,
+    ) or []
+    if not rows:
+        await m.reply_text("⌯ لا توجد إحصاءات بعد.")
+        return
+    msg = "📊 **أكثر الأعضاء نشاطاً**\n━━━━━━━━━━━━━━━━━━\n"
+    medals = ["🥇","🥈","🥉"]
+    for i, (uid, cnt) in enumerate(rows, 1):
+        try:
+            u    = (await context.bot.get_chat_member(cid, uid)).user
+            name = u.first_name
+        except:
+            name = str(uid)
+        medal = medals[i-1] if i <= 3 else f"{i}."
+        msg  += f"{medal} {name} — {cnt} رسالة\n"
+    await m.reply_text(msg, parse_mode="Markdown")
 
 def escape_md(t):
     for ch in ["_","*","[","]","(",")",
@@ -1402,9 +1261,11 @@ async def _user_info(m, context):
     cid    = str(m.chat.id)
     rank   = await get_user_rank(context, m.chat.id, tid)
     c_rank = get_custom_rank(cid, rank)
+    emoji  = RANK_EMOJI.get(rank, "")
     msgs   = db_exec("SELECT msgs FROM stats WHERE chat_id=? AND user_id=?",
                      (cid, tid), fetchone=True)
     msgs   = msgs[0] if msgs else 0
+    warns  = get_warnings(cid, tid)
     try:
         user      = (await context.bot.get_chat_member(cid, tid)).user
         username  = f"@{user.username}" if user.username else "لا يوجد"
@@ -1420,8 +1281,9 @@ async def _user_info(m, context):
         f"👤 **الاسم:** {escape_md(first_name)} {escape_md(last_name)}\n"
         f"🆔 **الايدي:** `{tid}`\n"
         f"🔗 **المعرف:** {escape_md(username)}\n"
-        f"🎖 **الرتبة:** {escape_md(c_rank)}\n"
+        f"🎖 **الرتبة:** {emoji} {escape_md(c_rank)}\n"
         f"💬 **الرسائل:** {msgs}\n"
+        f"⚠️ **التحذيرات:** {warns}/3\n"
         f"━━━━━━━━━━━━━━━━━━\n"
     )
     try:
@@ -1441,18 +1303,21 @@ async def _show_id(m, context):
     target = m.reply_to_message.from_user if m.reply_to_message else m.from_user
     rank   = await get_user_rank(context, m.chat.id, target.id)
     c_rank = get_custom_rank(cid, rank)
+    emoji  = RANK_EMOJI.get(rank, "")
     msgs   = db_exec("SELECT msgs FROM stats WHERE chat_id=? AND user_id=?",
                      (cid, target.id), fetchone=True)
     msgs   = msgs[0] if msgs else 0
+    warns  = get_warnings(cid, target.id)
     full   = f"{target.first_name} {target.last_name or ''}"
     caption = (
         f"\n📊 **معلومات العضو** 📊\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"👤 **الاسم:** {escape_md(full)}\n"
+        f"👤 **الاسم:** {escape_md(full.strip())}\n"
         f"🆔 **الايدي:** `{target.id}`\n"
         f"🔗 **المعرف:** {escape_md(f'@{target.username}' if target.username else 'لا يوجد')}\n"
-        f"🎖 **الرتبة:** {escape_md(c_rank)}\n"
+        f"🎖 **الرتبة:** {emoji} {escape_md(c_rank)}\n"
         f"💬 **الرسائل:** {msgs}\n"
+        f"⚠️ **التحذيرات:** {warns}/3\n"
         f"━━━━━━━━━━━━━━━━━━\n"
     )
     try:
@@ -1474,10 +1339,11 @@ async def _rank_of(m, context):
         return
     rank   = await get_user_rank(context, m.chat.id, tid)
     c_rank = get_custom_rank(str(m.chat.id), rank)
-    await m.reply_text(f"🎖 **رتبة {tname or tid}:** {c_rank}", parse_mode="Markdown")
+    emoji  = RANK_EMOJI.get(rank, "")
+    await m.reply_text(f"🎖 **رتبة {tname or tid}:** {emoji} {c_rank}", parse_mode="Markdown")
 
 async def _remove_all_ranks(m, rank, context, target_id=None, target_name=None):
-    if rank not in ("مطور","مالك اساسي","مالك","مدير"):
+    if rank not in ("مطور","الحاكم","مالك اساسي","مالك","مدير"):
         return
     tid   = target_id
     tname = target_name
@@ -1494,7 +1360,7 @@ async def _remove_all_ranks(m, rank, context, target_id=None, target_name=None):
     await m.reply_text(f"⌯ تم تنزيل {tname or tid} إلى عضو عادي.")
 
 async def _promote(m, rank, context):
-    if rank not in ("مطور","مالك اساسي","مالك","مدير"):
+    if rank not in ("مطور","الحاكم","مالك اساسي","مالك","مدير"):
         return
     cid = str(m.chat.id)
     tid, tname = await extract_target(context, m)
@@ -1510,16 +1376,17 @@ async def _promote(m, rank, context):
     if not new_rank:
         await m.reply_text(f"⌯ رتبة غير صحيحة. المتاحة: {', '.join(valid)}")
         return
+    emoji = RANK_EMOJI.get(new_rank, "")
     if action == "رفع":
         db_exec("INSERT OR REPLACE INTO ranks VALUES (?,?,?)", (cid, tid, new_rank), commit=True)
-        await m.reply_text(f"⌯ تم رفع {tname or tid} إلى {new_rank}")
+        await m.reply_text(f"⌯ تم رفع {tname or tid} إلى {emoji} {new_rank}")
     else:
         db_exec("DELETE FROM ranks WHERE chat_id=? AND user_id=? AND rank=?",
                 (cid, tid, new_rank), commit=True)
-        await m.reply_text(f"⌯ تم تنزيل {tname or tid} من {new_rank}")
+        await m.reply_text(f"⌯ تم تنزيل {tname or tid} من {emoji} {new_rank}")
 
 async def _punish(m, rank, context):
-    if rank not in ("مطور","مالك اساسي","مالك","مدير"):
+    if rank not in TOP_RANKS:
         return
     cid = str(m.chat.id)
     tid, tname = await extract_target(context, m)
@@ -1534,8 +1401,8 @@ async def _punish(m, rank, context):
         await m.reply_text("⌯ لا يمكنك معاقبة من هو أعلى!")
         return
 
-    text  = m.text
-    parts = text.split()
+    text    = m.text
+    parts   = text.split()
     dur_str = None
     for dw in ["ثانيتين","دقيقتين","ساعتين","يومين","اسبوعين","شهرين"]:
         if dw in text:
@@ -1555,30 +1422,24 @@ async def _punish(m, rank, context):
             except: pass
             db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='ban'",
                     (cid, tid), commit=True)
-            db_exec("DELETE FROM preexisting_punishments WHERE chat_id=? AND user_id=? AND type='ban'",
-                    (cid, tid), commit=True)
-            await m.reply_text(f"⌯ تم إلغاء حظر {disp}")
+            await m.reply_text(f"✅ تم إلغاء حظر {disp}")
         elif "كتم" in text:
             db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='mute'",
                     (cid, tid), commit=True)
-            await m.reply_text(f"⌯ تم إلغاء كتم {disp}")
+            await m.reply_text(f"✅ تم إلغاء كتم {disp}")
         elif "تقييد" in text:
             try:
                 await context.bot.restrict_chat_member(
                     cid, tid,
                     permissions=ChatPermissions(
-                        can_send_messages=True,
-                        can_send_polls=True,
-                        can_send_other_messages=True,
-                        can_add_web_page_previews=True,
+                        can_send_messages=True, can_send_media_messages=True,
+                        can_send_other_messages=True, can_add_web_page_previews=True,
                     ),
                 )
             except: pass
             db_exec("DELETE FROM punishments WHERE chat_id=? AND user_id=? AND type='restrict'",
                     (cid, tid), commit=True)
-            db_exec("DELETE FROM preexisting_punishments WHERE chat_id=? AND user_id=? AND type='restrict'",
-                    (cid, tid), commit=True)
-            await m.reply_text(f"⌯ تم إلغاء تقييد {disp}")
+            await m.reply_text(f"✅ تم إلغاء تقييد {disp}")
         return
 
     if "حظر" in text:
@@ -1588,7 +1449,7 @@ async def _punish(m, rank, context):
             db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
                     (cid, tid, "ban",
                      (until or datetime.now() + timedelta(days=365)).isoformat()), commit=True)
-            await m.reply_text(f"⌯ تم حظر {disp}" + (f" لمدة {dur_str}" if dur_str else ""))
+            await m.reply_text(f"⛔ تم حظر {disp}" + (f" لمدة {dur_str}" if dur_str else " نهائياً"))
         except Exception as e:
             await m.reply_text(f"⌯ فشل: {e}")
 
@@ -1596,7 +1457,7 @@ async def _punish(m, rank, context):
         exp = until or datetime.now() + timedelta(days=365)
         db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
                 (cid, tid, "mute", exp.isoformat()), commit=True)
-        await m.reply_text(f"⌯ تم كتم {disp}" + (f" لمدة {dur_str}" if dur_str else ""))
+        await m.reply_text(f"🔇 تم كتم {disp}" + (f" لمدة {dur_str}" if dur_str else ""))
 
     elif "تقييد" in text:
         try:
@@ -1609,7 +1470,7 @@ async def _punish(m, rank, context):
             db_exec("INSERT OR REPLACE INTO punishments VALUES (?,?,?,?)",
                     (cid, tid, "restrict",
                      (until or datetime.now() + timedelta(days=365)).isoformat()), commit=True)
-            await m.reply_text(f"⌯ تم تقييد {disp}" + (f" لمدة {dur_str}" if dur_str else ""))
+            await m.reply_text(f"🚫 تم تقييد {disp}" + (f" لمدة {dur_str}" if dur_str else ""))
         except Exception as e:
             await m.reply_text(f"⌯ فشل: {e}")
 
@@ -1617,12 +1478,12 @@ async def _punish(m, rank, context):
         try:
             await context.bot.ban_chat_member(cid, tid)
             await context.bot.unban_chat_member(cid, tid)
-            await m.reply_text(f"⌯ تم طرد {disp}")
+            await m.reply_text(f"👢 تم طرد {disp}")
         except Exception as e:
             await m.reply_text(f"⌯ فشل: {e}")
 
 async def _lock(m, rank, context):
-    if rank not in ("مطور","مالك اساسي","مالك","مدير"):
+    if rank not in ("مطور","الحاكم","مالك اساسي","مالك","مدير"):
         return
     parts  = m.text.split()
     action = parts[0]
@@ -1633,22 +1494,22 @@ async def _lock(m, rank, context):
         "الروابط":"links","اليوزرات":"usernames","الدردشه":"chat","الكل":"all",
     }
     if ltype not in items:
-        await m.reply_text(f"⌯ متاحة: {', '.join(items)}")
+        await m.reply_text(f"⌯ الأنواع المتاحة:\n" + " · ".join(items.keys()))
         return
     db_item = items[ltype]
     cid     = str(m.chat.id)
     if action == "قفل":
         db_exec("INSERT OR IGNORE INTO locks VALUES (?,?)", (cid, db_item), commit=True)
-        await m.reply_text(f"⌯ تم قفل {ltype}")
+        await m.reply_text(f"🔒 تم قفل {ltype}")
     else:
         db_exec("DELETE FROM locks WHERE chat_id=? AND item=?", (cid, db_item), commit=True)
-        await m.reply_text(f"⌯ تم فتح {ltype}")
+        await m.reply_text(f"🔓 تم فتح {ltype}")
 
 async def _responses_cmd(m, rank, context):
     cid  = str(m.chat.id)
     text = m.text
     if text == "اضف رد":
-        if rank not in ("مطور","مالك اساسي","مالك","مدير"):
+        if rank not in TOP_RANKS:
             return
         add_response_state[m.from_user.id] = {"step": 1, "chat_id": cid}
         await m.reply_text("⌯ أرسل الكلمة المفتاحية:")
@@ -1663,13 +1524,13 @@ async def _responses_cmd(m, rank, context):
         rows = db_exec("SELECT trigger, reply_type FROM responses WHERE chat_id=?",
                        (cid,), fetchall=True) or []
         if not rows:
-            await m.reply_text("⌯ لا توجد ردود")
+            await m.reply_text("⌯ لا توجد ردود مضافة")
         else:
             await m.reply_text("⌯ الردود المضافة:\n" +
                                "\n".join(f"• {r[0]} ({r[1]})" for r in rows))
 
 async def _clean(m, rank, context):
-    if rank not in ("مطور","مالك اساسي","مالك","مدير"):
+    if rank not in TOP_RANKS:
         return
     if m.text == "مسح" and m.reply_to_message:
         try: await context.bot.delete_message(m.chat.id, m.reply_to_message.message_id)
@@ -1686,23 +1547,27 @@ async def _lists(m, rank, context):
     cid  = str(m.chat.id)
     text = m.text
     allowed = {
-        "المطورين":            ("مطور",),
-        "المالكيين الاساسيين": ("مطور",),
-        "المالكيين":           ("مطور","مالك اساسي"),
-        "المدراء":             ("مطور","مالك اساسي","مالك","مدير"),
-        "الادمنيه":            ("مطور","مالك اساسي","مالك","مدير","ادمن"),
-        "المميزين":            ("مطور","مالك اساسي","مالك","مدير","ادمن","مميز"),
-        "المشرفين":            ("مطور","مالك اساسي","مالك","مدير"),
+        "المطورين":            ("مطور","الحاكم"),
+        "الحكام":              ("مطور","الحاكم"),
+        "المالكيين الاساسيين": ("مطور","الحاكم"),
+        "المالكيين":           ("مطور","الحاكم","مالك اساسي"),
+        "المدراء":             ("مطور","الحاكم","مالك اساسي","مالك","مدير"),
+        "الادمنيه":            ("مطور","الحاكم","مالك اساسي","مالك","مدير","ادمن"),
+        "المميزين":            ("مطور","الحاكم","مالك اساسي","مالك","مدير","ادمن","مميز"),
+        "المشرفين":            ("مطور","الحاكم","مالك اساسي","مالك","مدير"),
     }
     if text not in allowed or rank not in allowed[text]:
-        await m.reply_text("⌯ ليس لديك صلاحية")
+        await m.reply_text("⌯ ليس لديك صلاحية لعرض هذه القائمة")
         return
+
     if text == "المطورين":
-        await m.reply_text(f"⌯ المطور: @{DEV_USERNAME}")
+        await m.reply_text(f"⚙️ المطور: @{DEV_USERNAME}")
+    elif text == "الحكام":
+        await m.reply_text(f"👑 الحاكم: @{RULER_USERNAME}")
     elif text == "المشرفين":
         try:
             admins = await context.bot.get_chat_administrators(cid)
-            msg = "⌯ قائمة المشرفين:\n" + "\n".join(
+            msg = "🛡️ قائمة المشرفين:\n" + "\n".join(
                 f"• {a.user.first_name} (@{a.user.username or 'لا يوجد'})" for a in admins
             )
             await m.reply_text(msg)
@@ -1710,33 +1575,33 @@ async def _lists(m, rank, context):
             await m.reply_text("⌯ لا يمكن جلب القائمة")
     else:
         rmap = {
-            "المالكيين الاساسيين":"مالك اساسي","المالكيين":"مالك",
-            "المدراء":"مدير","الادمنيه":"ادمن","المميزين":"مميز",
+            "المالكيين الاساسيين": "مالك اساسي",
+            "المالكيين":           "مالك",
+            "المدراء":             "مدير",
+            "الادمنيه":            "ادمن",
+            "المميزين":            "مميز",
         }
         t_rank = rmap.get(text)
         if t_rank:
             rows = db_exec("SELECT user_id FROM ranks WHERE chat_id=? AND rank=?",
                            (cid, t_rank), fetchall=True) or []
             if not rows:
-                await m.reply_text(f"⌯ لا يوجد {t_rank}")
+                await m.reply_text(f"⌯ لا يوجد {t_rank} في قاعدة البيانات")
             else:
-                msg = f"⌯ قائمة {t_rank}:\n"
+                emoji = RANK_EMOJI.get(t_rank, "")
+                msg   = f"⌯ قائمة {emoji} {t_rank}:\n"
                 for (uid,) in rows:
                     try:
-                        u = (await context.bot.get_chat_member(cid, uid)).user
-                        msg += f"• {u.first_name} (@{u.username or 'لا يوجد'}) - {uid}\n"
+                        u   = (await context.bot.get_chat_member(cid, uid)).user
+                        msg += f"• {u.first_name} (@{u.username or 'لا يوجد'}) — {uid}\n"
                     except:
-                        msg += f"• مستخدم غادر - {uid}\n"
+                        msg += f"• مستخدم غادر — {uid}\n"
                 await m.reply_text(msg)
 
 # ═══════════════════════════════════════════════
-#     لوحة التحكم: رفع/تنزيل المشرفين (Inline)
+#     لوحة التحكم (Inline — رفع/تنزيل المشرفين)
 # ═══════════════════════════════════════════════
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ══ تجاهل الأحداث القديمة ══
-    if is_old_update(update):
-        return
-
     user = update.effective_user
     if not is_authorized(user):
         return
@@ -1754,6 +1619,38 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
     )
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    txt = (
+        "📋 **قائمة الأوامر — بوت الحماية V3**\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🔹 **للجميع:**\n"
+        "• `رتبتي` / `ايدي` — معلوماتك الكاملة\n"
+        "• `رتبته @user` — رتبة شخص\n"
+        "• `كشف @user` — معلومات عضو\n"
+        "• `تحذيراتي` — عدد تحذيراتك\n"
+        "• `ادمن` (رد) — إبلاغ عن مخالفة\n\n"
+        "🔸 **للإدارة:**\n"
+        "• `حظر / كتم / تقييد / طرد @user [مدة]`\n"
+        "• `الغاء حظر/كتم/تقييد @user`\n"
+        "• `رفع / تنزيل [رتبة] @user`\n"
+        "• `تحذير @user` — تحذير (3 = تقييد 24س)\n"
+        "• `مسح التحذيرات @user` — مسح التحذيرات\n"
+        "• `رفع القيود @user` — رفع كل العقوبات\n"
+        "• `تنزيل الكل @user` — حذف كل الرتب\n\n"
+        "🔒 **الأقفال:**\n"
+        "• `قفل / فتح [نوع]`\n"
+        "• الأنواع: الصور · الفيديو · الملصقات · الملفات · الروابط · اليوزرات · الدردشه · الكل\n"
+        "• `الاقفال` — عرض الأقفال المفعّلة\n\n"
+        "📊 **أخرى:**\n"
+        "• `احصائيات` — أكثر الأعضاء نشاطاً\n"
+        "• `اضف رد` / `الردود` / `مسح رد [كلمة]`\n"
+        "• `مسح [رقم]` — حذف عدد رسائل\n\n"
+        "🏆 **الرتب:**\n"
+        "👑 الحاكم · ⚙️ مطور · 💎 مالك اساسي\n"
+        "🔱 مالك · 🛡️ مدير · ⚡ ادمن · ⭐ مميز · 👤 عضو"
+    )
+    await update.message.reply_text(txt, parse_mode="Markdown")
+
 async def on_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -1761,10 +1658,8 @@ async def on_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = int(q.data.split(":")[1])
     title   = context.bot_data.get("known_chats", {}).get(str(chat_id), str(chat_id))
-    rows    = db_exec(
-        "SELECT user_id FROM bot_managed_admins WHERE chat_id=?",
-        (str(chat_id),), fetchall=True,
-    ) or []
+    rows    = db_exec("SELECT user_id FROM bot_managed_admins WHERE chat_id=?",
+                      (str(chat_id),), fetchall=True) or []
     managed = [r[0] for r in rows]
     kb = []
     for uid in managed:
@@ -1812,10 +1707,6 @@ async def on_ask_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def on_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ══ تجاهل الأحداث القديمة ══
-    if is_old_update(update):
-        return
-
     if not is_authorized(update.effective_user):
         return
     if "await_promote_cid" not in context.user_data:
@@ -1830,82 +1721,6 @@ async def on_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def on_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-
-# ═══════════════════════════════════════════════
-#          دالة الكشف المساعدة
-# ═══════════════════════════════════════════════
-async def _run_detection_and_reply(msg, context):
-    """تنفيذ عملية الكشف وإرسال النتيجة للمستخدم"""
-    try:
-        top_pairs = await detection.find_top_similar_pairs(max_users=15, top_n=3)
-
-        if not top_pairs:
-            await msg.reply_text(
-                "⚠️ لا توجد بيانات كافية\n\n"
-                "تأكد أن:\n"
-                "• القناة clanarba تحتوي على رسائل\n"
-                "• الأعضاء أرسلوا أكثر من 10 رسائل\n"
-                "• الجلسة SESSION_STRING صحيحة"
-            )
-            return
-
-        all_clean = all(pair.get("no_suspicious") for pair in top_pairs)
-
-        if all_clean:
-            answer = (
-                "✅ نتيجة الكشف: لا توجد حسابات مشبوهة\n\n"
-                "لم يُكتشف أي تشابه واضح بين أعضاء القناة.\n"
-                f"تم فحص {len(top_pairs)} زوج — أعلى نسبة: {top_pairs[0]['similarity']}%\n\n"
-                "(الحد الأدنى للاشتباه: 20%)"
-            )
-            await msg.reply_text(answer)
-            return
-
-        answer = "🔍 نتائج كشف الحسابات المشبوهة\n"
-        answer += "━━━━━━━━━━━━━━━━━━\n\n"
-
-        for idx, pair in enumerate(top_pairs, 1):
-            sim    = pair['similarity']
-            timing = pair.get('timing', 0)
-
-            if sim >= 70:
-                level = "🔴 خطر عالٍ"
-            elif sim >= 40:
-                level = "🟠 مشبوه"
-            else:
-                level = "🟡 تحت المراقبة"
-
-            report_text = pair['report']
-            report_lines = [
-                ln for ln in report_text.splitlines()
-                if not ln.strip().startswith("نسبة التشابه:")
-            ]
-            clean_report = "\n".join(report_lines).strip()[:300]
-            for ch in ["*", "_", "`", "[", "]", "(", ")"]:
-                clean_report = clean_report.replace(ch, "")
-
-            u1 = str(pair['user1']).replace("`","")
-            u2 = str(pair['user2']).replace("`","")
-
-            answer += (
-                f"┏━━ الزوج {idx} — {level}\n"
-                f"┣ 👤 {u1}  ⇄  {u2}\n"
-                f"┣ 📊 نسبة التشابه: {sim}%\n"
-                f"┣ ⏱ التشابه الزمني: {timing}%\n"
-                f"┗ 📝 {clean_report}\n\n"
-            )
-
-        answer += "━━━━━━━━━━━━━━━━━━\n"
-        answer += "⚠️ هذه نتائج مساعدة، القرار النهائي للإدارة"
-
-        await msg.reply_text(answer)
-
-    except Exception as e:
-        await msg.reply_text(
-            f"❌ خطأ أثناء الكشف:\n{str(e)}\n\n"
-            "تحقق من صحة SESSION_STRING وأن القناة موجودة."
-        )
-        logging.error(f"Detection error: {e}")
 
 # ═══════════════════════════════════════════════
 #                   التشغيل
@@ -1926,24 +1741,20 @@ if __name__ == "__main__":
     )
 
     app.add_handler(MessageHandler(media_filter, handle_media), group=0)
-
     app.add_handler(
         MessageHandler(filters.TEXT & filters.REPLY & filters.Regex(r"^ادمن$"), handle_report),
         group=1,
     )
-
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
         group=2,
     )
-
     app.add_handler(CommandHandler("start", start_cmd))
-
-    app.add_handler(CallbackQueryHandler(on_select,   pattern=r"^sc:"))
-    app.add_handler(CallbackQueryHandler(on_demote_cb,pattern=r"^dm:"))
-    app.add_handler(CallbackQueryHandler(on_ask_id,   pattern=r"^ai:"))
-    app.add_handler(CallbackQueryHandler(on_noop,     pattern=r"^noop$"))
-
+    app.add_handler(CommandHandler("help",  help_cmd))
+    app.add_handler(CallbackQueryHandler(on_select,    pattern=r"^sc:"))
+    app.add_handler(CallbackQueryHandler(on_demote_cb, pattern=r"^dm:"))
+    app.add_handler(CallbackQueryHandler(on_ask_id,    pattern=r"^ai:"))
+    app.add_handler(CallbackQueryHandler(on_noop,      pattern=r"^noop$"))
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
@@ -1952,12 +1763,8 @@ if __name__ == "__main__":
         group=3,
     )
 
-    print(f"🚀 البوت يعمل — وقت البدء: {datetime.fromtimestamp(BOT_START_TIME)}")
-    print("⏩ أي حدث قبل هذا الوقت سيُتجاهل تلقائياً")
-    print("📸 سيتم تسجيل المحظورين والمقيدين عند أول رسالة من كل مجموعة")
-
-    # drop_pending_updates=True يضمن تجاهل أي updates متراكمة قبل التشغيل
+    print("🚀 بوت الحماية V3 يعمل — يتجاهل الرسائل القديمة تلقائياً ⚡")
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
+        drop_pending_updates=True,      # ← يتجاهل كل الرسائل قبل تشغيل البوت
     )
