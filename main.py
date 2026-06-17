@@ -1,10 +1,15 @@
 import socket
 _orig = socket.getaddrinfo
 def _patch(host, port, *a, **k):
-    if host == 'api-inference.huggingface.co':
-        host = '18.184.233.10'
+    _map = {
+        'api-inference.huggingface.co': '18.184.233.10',
+        'translate.googleapis.com':     '142.250.185.138',
+    }
+    if host in _map:
+        host = _map[host]
     return _orig(host, port, *a, **k)
 socket.getaddrinfo = _patch
+
 import logging
 import os
 import requests
@@ -16,9 +21,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 import asyncio
 
-# ================================================================
-# التوكنات من متغيرات Railway
-# ================================================================
 API_TOKEN = os.environ.get('API_TOKEN')
 HF_TOKEN  = os.environ.get('HF_TOKEN')
 
@@ -46,10 +48,12 @@ def generate_music(prompt: str) -> bytes | None:
         "options": {"wait_for_model": True, "use_cache": False}
     }
     try:
-        resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120)
+        logging.info(f"Calling HF API...")
+        resp = requests.post(HF_API_URL, headers=headers, json=payload, timeout=120, verify=False)
+        logging.info(f"HF Response: {resp.status_code}")
         if resp.status_code == 200:
             return resp.content
-        logging.error(f"HF Error {resp.status_code}: {resp.text}")
+        logging.error(f"HF Error {resp.status_code}: {resp.text[:300]}")
         return None
     except Exception as e:
         logging.error(f"HF Exception: {e}")
@@ -58,7 +62,7 @@ def generate_music(prompt: str) -> bytes | None:
 def translate_to_english(text: str) -> str:
     try:
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={quote(text)}"
-        return requests.get(url, timeout=5).json()[0][0][0]
+        return requests.get(url, timeout=5, verify=False).json()[0][0][0]
     except:
         return text
 
