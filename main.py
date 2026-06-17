@@ -2,8 +2,8 @@ import socket
 _orig = socket.getaddrinfo
 def _patch(host, port, *a, **k):
     _map = {
-        'api-inference.huggingface.co': '18.184.233.10',
-        'translate.googleapis.com':     '142.250.185.138',
+        'facebook-musicgen-small.hf.space': '34.149.68.176',
+        'translate.googleapis.com':         '142.250.185.138',
     }
     if host in _map:
         host = _map[host]
@@ -34,6 +34,141 @@ GENRE_MAP = {
     "epic":       "⚔️ ملحمي (Epic/Cinematic)",
     "arabic":     "🎶 عربي (Arabic Oriental)",
     "electronic": "🎛️ إلكتروني (Electronic/EDM)",
+    "jazz":       "🎷 جاز (Jazz & Blues)",
+    "ambient":    "🌌 هادئ (Ambient/Meditation)",
+}
+
+HF_SPACE_URL = "https://facebook-musicgen-small.hf.space/run/predict"
+
+def generate_music(prompt: str) -> bytes | None:
+    try:
+        logging.info(f"Calling HF Space: {prompt[:80]}")
+        payload = {"data": [prompt, None, None, 10]}
+        resp = requests.post(HF_SPACE_URL, json=payload, timeout=120, verify=False)
+        logging.info(f"HF Space Response: {resp.status_code}")
+
+        if resp.status_code == 200:
+            data = resp.json()
+            logging.info(f"Response keys: {list(data.keys())}")
+
+            # استخرج رابط الصوت
+            audio_url = None
+            if 'data' in data and len(data['data']) > 0:
+                item = data['data'][0]
+                if isinstance(item, dict) and 'url' in item:
+                    audio_url = item['url']
+                elif isinstance(item, str) and item.startswith('http'):
+                    audio_url = item
+
+            if audio_url:
+                logging.info(f"Downloading audio from: {audio_url}")
+                audio_resp = requests.get(audio_url, timeout=60, verify=False)
+                if audio_resp.status_code == 200:
+                    return audio_resp.content
+            else:
+                logging.error(f"No audio URL found in: {str(data)[:300]}")
+        else:
+            logging.error(f"HF Space Error {resp.status_code}: {resp.text[:300]}")
+        return None
+    except Exception as e:
+        logging.error(f"HF Space Exception: {e}")
+        return None
+
+def translate_to_english(text: str) -> str:
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={quote(text)}"
+        return requests.get(url, timeout=5, verify=False).json()[0][0][0]
+    except:
+        return text
+
+class MusicStates(StatesGroup):
+    waiting_for_genre = State()
+
+@dp.message(Command("start", "help"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "🎵 <b>أهلاً بك في بوت توليد الموسيقى!</b>\n\n"
+        "✏️ أرسل وصف الموسيقى التي تريدها\n"
+        "مثال: <i>موسيقى هادئة للنوم</i>",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text)
+async def handle_prompt(message: types.Message, state: FSMContext):
+    await state.update_data(user_prompt=message.text.strip())
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="🎧 Lo-Fi",    callback_data="genre_lofi"),
+            types.InlineKeyboardButton(text="⚔️ ملحمي",    callback_data="genre_epic"),
+        ],
+        [
+            types.InlineKeyboardButton(text="🎶 عربي",     callback_data="genre_arabic"),
+            types.InlineKeyboardButton(text="🎛️ إلكتروني", callback_data="genre_electronic"),
+        ],
+        [
+            types.InlineKeyboardButton(text="🎷 جاز",      callback_data="genre_jazz"),
+            types.InlineKeyboardButton(text="🌌 هادئ",     callback_data="genre_ambient"),
+        ],
+    ])
+    await message.answer("👇 <b>اختر نوع الموسيقى:</b>", reply_markup=keyboard, parse_mode="HTML")
+    await state.set_state(MusicStates.waiting_for_genre)
+
+@dp.callback_query(F.data.startswith("genre_"), MusicStates.waiting_for_genre)
+async def handle_genre(call: types.CallbackQuery, state: FSMContext):
+    chat_id   = call.message.chat.id
+    genre_key = call.data.split("_", 1)[1]
+    data      = await state.get_data()
+    original  = data.get("user_prompt")
+
+    if not original:
+        await call.answer("❌ انتهت الجلسة، أرسل وصفاً جديداً.", show_alert=True)
+        await state.clear()
+        return
+
+    await call.message.edit_text("🎵 <b>جاري توليد الموسيقى... ⏳ (30-60 ثانية)</b>", parse_mode="HTML")
+
+    english = translate_to_english(original)
+    prompts = {
+        "lofi":       f"{english}, lofi hip hop, relaxing beats, chill, mellow",
+        "epic":       f"{english}, epic cinematic orchestral, dramatic, powerful",
+        "arabic":     f"{english}, arabic oriental music, oud, qanun, middle eastern",
+        "electronic": f"{english}, electronic EDM, synthesizer, energetic, dance",
+        "jazz":       f"{english}, jazz music, saxophone, piano, smooth, swing",
+        "ambient":    f"{english}, ambient meditation, peaceful, soft pads, calm",
+    }
+
+    audio = generate_music(prompts.get(genre_key, english))
+
+    if audio and len(audio) > 1000:
+        path = f"/tmp/music_{chat_id}.wav"
+        with open(path, "wb") as f:
+            f.write(audio)
+        audio_file = types.BufferedInputFile(open(path, "rb").read(), filename="music.wav")
+        await bot.send_audio(
+            chat_id=chat_id,
+            audio=audio_file,
+            title=f"🎵 {original[:40]}",
+            performer="AI Music Bot",
+            caption=(
+                f"✨ <b>تم التوليد!</b>\n"
+                f"✏️ <b>الوصف:</b> « {original} »\n"
+                f"🎭 <b>النوع:</b> {GENRE_MAP.get(genre_key, genre_key)}"
+            ),
+            parse_mode="HTML"
+        )
+        os.remove(path)
+        await call.message.delete()
+    else:
+        await call.message.edit_text("❌ فشل التوليد، حاول مرة أخرى.")
+
+    await state.clear()
+
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
     "jazz":       "🎷 جاز (Jazz & Blues)",
     "ambient":    "🌌 هادئ (Ambient/Meditation)",
 }
